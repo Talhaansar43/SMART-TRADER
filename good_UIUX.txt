@@ -1,0 +1,80 @@
+Video series by synsation(instagram)
+
+Part 1
+Beautiful UI with bad UX will make people leave. This is a series on how to build with good UX. And for part one, we need to understand the difference between UI and UX. UI stands for user interface, and it is what your app looks like.
+
+Think colors, buttons, layout. And having good UI is attractive to people using it. But now I want you to think of a time when you were using an app or on a website, and you clicked on a button, and you had an unpredictable result.
+
+Or nothing at all happened, so you tried again, and then got confused. And then you might go as far as even blaming yourself, like, oh, maybe I didn't do this right or something. That is bad UX.
+
+That stands for user experience. Can someone figure out what to do without extensive instructions? What happens if something fails?
+
+Does the user get to know about that in a graceful way? And here's the thing, a lot of AI tools inherently are not good at giving you good UX. They often build what I like to call the happy path.
+
+What the screen looks like when everything goes perfectly like you planned it. But here's the thing, as someone who is building this, you're gonna know your app in and out. And so sometimes the way that you behave on your app is not the way that the user will.
+
+And AI tools will often miss the loading state, the empty state, the error state. Good UX can also build a lot of trust with your product as well. And if your app is beautiful but hard to use or there's too many steps, that creates friction and friction causes people to leave. In this series, I'm going to unpack many different scenarios.
+
+If you're building software and you want to have good UX, you're going to want to know these.
+
+Part 2
+Every screen in your app has four states you should be building. Loading, success, error, and empty. And if you're not thinking about all four, your users will notice.
+
+This is part two of my series of how to build for good UX. Today, we're talking about loading states. And to do that, we are going to take a trip through history.
+
+In 1984, the Mac showed you a tiny wristwatch cursor when something was loading. No animation. Windows came along in 1985 with the hourglass, still no animation, and that lasted for about 20 years.
+
+And in the late 80s, we started seeing progress bars for the first time. Research at the time showed that 86% of people preferred them, even if they weren't even accurate. In 2001, Mac OS X gave us the spinning rainbow wheel, which I like to call the beach ball of death.
+
+It was animated, but it told you nothing. Has it been five seconds or two minutes? No idea.
+
+And technically, it still exists today, you just don't see it as much because the hardware is a lot better. Now we have skeleton screens, those gray placeholder outlines on Instagram or other apps. The concept came from a designer in 2013. Facebook was early to adopt it.
+
+And they work because your brain starts processing all of the layout before the data arrives. We do still use spinners too, inside buttons, or in smaller parts of the page where the skeleton doesn't really make sense. Loaders should feel intuitive most of the time when they're there.
+
+You don't really even think or notice them. But when they're missing, users do notice and they assume something is broken. Now when they're done well, people will wait longer without even realizing it.
+
+Next video, I'm going to talk about which loader to use where. The skeleton, the spinner, the progress bar, because they're not interchangeable. Follow so you don't miss out.
+
+
+Part4
+How long are you actually willing to stare at a loading spinner before you get annoyed? Let's break down the psychology of spinners. This is part four of my series of building for good UX.
+
+If you show nothing, a blank screen, no spinner, users will leave in two to three seconds. But here's the thing, you should never show a spinner if something will take less than a second to load. One second is not enough time to show the full animation, because then it just flashes on the screen and the user's brain registers like something weird just happened.
+
+You actually make it feel slower, so if it's under one second, just show the result. Okay, so what if your action takes longer than a second? A plain spinner with no text works for about 2-5 seconds.
+
+In past 5 seconds, a spinner with no text starts to feel broken. The user has no idea what's happening and the patience starts to drop very quickly. So you add some static text.
+
+Loading or saving and that buys you maybe one more second. Now instead of static text, you show text that changes. Connecting to your account, then almost there.
+
+This is where people are willing to wait significantly longer. Because they feel that there's action happening, even if it's fake. But all of this works up to about 10 seconds.
+
+After 10 seconds, looped animations just stop working. Don't do them. They actually start hurting.
+
+The user's patience flips, and all of a sudden, they're feeling more frustrated with the spinner instead of less. Past 10 seconds, you need a different approach. A progress bar, a step-by-step indicator, something else.
+
+And if something fails, just show the error immediately as soon as you can. Try not to make them wait 20 seconds with a loading spinner and then be like, sorry that didn't work. And speaking about errors, in the next video, we're going to talk about those.
+
+So see you there.
+
+Part5
+What makes a good error message? This is part five of my series of building with good UX. In the last three parts, we went deep on loading states, and now we're going to error states.
+
+And if you're building with AI tools, unless you specifically ask for it, most tools are pretty bad at creating error states by default. First is your error message should never be your database or backend logic just dumped on the screen. One, being how would a regular person even know what that means?
+
+And two, this could also be a security vulnerability if you're exposing details about your app's backend. Okay, so then you just put something went wrong, right? wrong.
+
+Your user doesn't need to know the technical details, but they do need something less vague than that. Think about it. If you enter your card information and you press pay and it says something went wrong, you have no idea if your payment went through or not.
+
+That is a pretty terrible user experience. A good error message does three things. It tells them what happened, why it happened, and gives them a clear action.
+
+So instead of saying something went wrong, you say your payment didn't go through, your card was declined. Please check your card details or try a different payment method. Now the user knows exactly what happened, why, and what's next.
+
+And And then there's the worst kind of error, the silent failure. No message at all. The user clicks submit, the button does nothing, the screen doesn't change.
+
+They don't know if it worked, if it broke. And this is what a lot of Vibe coding AI tools generate by default. So you need to know these things to know what to ask for.
+
+In the next video, we're gonna talk about forms and how a lot of people don't feel like filling them out and how to design them so that your user hates you a little less, so follow for more.
+
+Part6
