@@ -1,31 +1,54 @@
-#!/bin/bash
-
 # Smart Trader - Backend Startup Script
-# This script starts the FastAPI development server
+# Windows PowerShell
 
-set -e
+$ErrorActionPreference = "Stop"
 
-echo "🚀 Starting Smart Trader Backend..."
-echo ""
+Write-Host "🚀 Starting Smart Trader Backend..." -ForegroundColor Cyan
+Write-Host ""
 
-BACKEND_DIR="$(dirname "$0")/backend"
-cd "$BACKEND_DIR"
+# Get project/backend directories
+$ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$BackendDir = Join-Path $ProjectRoot "backend"
+$VenvDir = Join-Path $BackendDir "venv"
+$Python = Join-Path $VenvDir "Scripts\python.exe"
+$Requirements = Join-Path $BackendDir "requirements.txt"
 
-# Check if virtual environment exists
-if [ ! -d "venv" ]; then
-    echo "📦 Creating Python virtual environment..."
-    python3.11 -m venv venv
-    echo "📥 Installing dependencies..."
-    ./venv/bin/pip install -r requirements.txt
-fi
+# Move to backend directory
+Set-Location $BackendDir
 
-echo "✨ Starting FastAPI server on http://localhost:8000"
-echo "📚 API Documentation: http://localhost:8000/docs"
-echo ""
-echo "Press Ctrl+C to stop"
-echo ""
+# Create virtual environment if it doesn't exist
+if (-not (Test-Path $Python)) {
+    Write-Host "📦 Creating Python 3.11 virtual environment..." -ForegroundColor Yellow
 
-# Export Finnhub API key
-export FINNHUB_API_KEY="d2rfajhr01qv11lec7u0d2rfajhr01qv11lec7ug"
+    py -3.11 -m venv $VenvDir
 
-./venv/bin/python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to create Python virtual environment."
+    }
+}
+
+# Install dependencies if requested
+if (Test-Path $Requirements) {
+    Write-Host "📥 Checking backend dependencies..." -ForegroundColor Yellow
+
+    & $Python -m pip install -r $Requirements --disable-pip-version-check
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to install backend dependencies."
+    }
+}
+
+# Finnhub API key
+$env:FINNHUB_API_KEY = "d2rfajhr01qv11lec7u0d2rfajhr01qv11lec7ug"
+
+Write-Host ""
+Write-Host "✨ Starting FastAPI server..." -ForegroundColor Green
+Write-Host "🌐 API:  http://localhost:8000"
+Write-Host "📚 Docs: http://localhost:8000/docs"
+Write-Host ""
+Write-Host "Press Ctrl+C to stop"
+Write-Host ""
+
+# Start FastAPI
+& $Python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+

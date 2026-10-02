@@ -1,4 +1,4 @@
-// File: /Users/muhammad.ansar/Documents/Smart_Trader/smart-trader/frontend/app/portfolio/page.tsx
+// File: C:\Github\SMART-TRADER\frontend\app\portfolio\page.tsx
 import * as entry from '../../../../app/portfolio/page.js'
 import type { ResolvingMetadata, ResolvingViewport } from 'next/dist/lib/metadata/types/metadata-interface.js'
 
