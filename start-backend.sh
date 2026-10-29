@@ -31,15 +31,15 @@ if (-not (Test-Path $Python)) {
 if (Test-Path $Requirements) {
     Write-Host "📥 Checking backend dependencies..." -ForegroundColor Yellow
 
-    & $Python -m pip install -r $Requirements --disable-pip-version-check
+    & $Python -m pip install --use-feature=truststore -r $Requirements --disable-pip-version-check
 
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to install backend dependencies."
     }
 }
 
-# Finnhub API key
-$env:FINNHUB_API_KEY = "d2rfajhr01qv11lec7u0d2rfajhr01qv11lec7ug"
+# app.config reads FINNHUB_API_KEY from the environment or backend .env.
+# Do not store API keys in this script.
 
 Write-Host ""
 Write-Host "✨ Starting FastAPI server..." -ForegroundColor Green

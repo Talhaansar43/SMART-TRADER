@@ -8,7 +8,7 @@
 'use client';
 
 interface MarketStatsProps {
-  status: 'live' | 'pre-opening' | 'offline';
+  status: 'finnhub' | 'mock' | 'mixed' | 'unavailable';
   dataFreshness: string;
   stocksTracked: number;
 }
@@ -16,11 +16,13 @@ interface MarketStatsProps {
 export function MarketStats({ status, dataFreshness, stocksTracked }: MarketStatsProps) {
   const getStatusColor = () => {
     switch (status) {
-      case 'live':
+      case 'finnhub':
         return { bg: 'bg-green-100', text: 'text-green-800', badge: 'bg-green-600' };
-      case 'pre-opening':
+      case 'mock':
         return { bg: 'bg-yellow-100', text: 'text-yellow-800', badge: 'bg-yellow-600' };
-      case 'offline':
+      case 'mixed':
+        return { bg: 'bg-yellow-100', text: 'text-yellow-800', badge: 'bg-yellow-600' };
+      case 'unavailable':
         return { bg: 'bg-gray-100', text: 'text-gray-800', badge: 'bg-gray-600' };
     }
   };
@@ -32,12 +34,14 @@ export function MarketStats({ status, dataFreshness, stocksTracked }: MarketStat
       <div className="bg-white rounded-lg border border-slate-200 p-4">
         <div className="flex items-center gap-3">
           <div className="flex-1">
-            <p className="text-sm text-slate-600">Market Status</p>
-            <p className="text-lg font-bold text-slate-900 capitalize">{status}</p>
+            <p className="text-sm text-slate-600">Market Data Feed</p>
+            <p className="text-lg font-bold text-slate-900">
+              {status === 'finnhub' ? 'Finnhub' : status === 'mock' ? 'Mock data' : status === 'mixed' ? 'Mixed sources' : 'Unavailable'}
+            </p>
           </div>
           <div className={`w-12 h-12 rounded-lg flex items-center justify-center ${colors.bg}`}>
             <span className={`w-3 h-3 rounded-full ${colors.badge} ${
-              status !== 'offline' ? 'animate-pulse' : ''
+              status === 'finnhub' ? 'animate-pulse' : ''
             }`}></span>
           </div>
         </div>
@@ -46,7 +50,7 @@ export function MarketStats({ status, dataFreshness, stocksTracked }: MarketStat
       <div className="bg-white rounded-lg border border-slate-200 p-4">
         <div className="flex items-center gap-3">
           <div className="flex-1">
-            <p className="text-sm text-slate-600">Data Freshness</p>
+            <p className="text-sm text-slate-600">Refresh Cadence</p>
             <p className="text-lg font-bold text-slate-900">{dataFreshness}</p>
           </div>
           <div className="w-12 h-12 rounded-lg bg-blue-100 flex items-center justify-center">

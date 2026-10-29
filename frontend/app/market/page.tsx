@@ -29,41 +29,23 @@ interface StockData {
   mock: boolean;
   source: string;
   lastUpdated: string;
+  dataTimestamp?: string | null;
+  retrievedAt?: string;
 }
 
 // Top 10 popular stocks
 const TOP_SYMBOLS = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'NVDA', 'META', 'NFLX', 'ADBE', 'CRM'];
 
-// Market status enum
-type MarketStatus = 'live' | 'pre-opening' | 'offline';
+type FeedStatus = 'finnhub' | 'mock' | 'mixed' | 'unavailable';
 
-const getMarketStatus = (): MarketStatus => {
-  const now = new Date();
-  const day = now.getDay();
-  const hours = now.getHours();
-  const minutes = now.getMinutes();
-  const timeInMinutes = hours * 60 + minutes;
+const getFeedStatus = (stocks: StockData[]): FeedStatus => {
+  if (stocks.length === 0) return 'unavailable';
 
-  // US Market hours: 9:30 AM - 4:00 PM EST (Monday-Friday)
-  // Pre-opening: 4:00 AM - 9:30 AM
-  // Offline: 4:00 PM - 4:00 AM and weekends
-
-  if (day === 0 || day === 6) {
-    // Weekends
-    return 'offline';
-  }
-
-  const marketOpen = 9 * 60 + 30; // 9:30 AM
-  const marketClose = 16 * 60; // 4:00 PM
-  const preMarketStart = 4 * 60; // 4:00 AM
-
-  if (timeInMinutes >= marketOpen && timeInMinutes < marketClose) {
-    return 'live';
-  } else if (timeInMinutes >= preMarketStart && timeInMinutes < marketOpen) {
-    return 'pre-opening';
-  } else {
-    return 'offline';
-  }
+  const sources = new Set(stocks.map((stock) => stock.source));
+  if (sources.size === 1 && sources.has('finnhub')) return 'finnhub';
+  if (sources.size === 1 && sources.has('mock')) return 'mock';
+  if (sources.size === 1 && sources.has('error')) return 'unavailable';
+  return 'mixed';
 };
 
 const fetchStockPrice = async (symbol: string) => {
@@ -77,7 +59,6 @@ const fetchStockPrice = async (symbol: string) => {
 };
 
 export default function MarketPage() {
-  const [marketStatus, setMarketStatus] = useState<MarketStatus>('offline');
   const [stocksData, setStocksData] = useState<StockData[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
@@ -112,14 +93,6 @@ export default function MarketPage() {
     staleTime: 4 * 60 * 1000, // Data is fresh for 4 minutes
   });
 
-  // Update market status every minute
-  useEffect(() => {
-    const updateStatus = () => setMarketStatus(getMarketStatus());
-    updateStatus();
-    const interval = setInterval(updateStatus, 60000);
-    return () => clearInterval(interval);
-  }, []);
-
   // Set loading to false once we have at least some data
   useEffect(() => {
     if (stocksData.length > 0) {
@@ -127,27 +100,36 @@ export default function MarketPage() {
     }
   }, [stocksData]);
 
-  const getStatusBadge = (status: MarketStatus) => {
+  const feedStatus = getFeedStatus(stocksData);
+
+  const getStatusBadge = (status: FeedStatus) => {
     switch (status) {
-      case 'live':
+      case 'finnhub':
         return (
           <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-sm font-medium bg-green-100 text-green-800">
-            <span className="w-2 h-2 bg-green-600 rounded-full animate-pulse"></span>
-            Market Open (Live)
+            <span className="w-2 h-2 bg-green-600 rounded-full"></span>
+            Finnhub feed
           </span>
         );
-      case 'pre-opening':
+      case 'mock':
         return (
           <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-sm font-medium bg-yellow-100 text-yellow-800">
-            <span className="w-2 h-2 bg-yellow-600 rounded-full animate-pulse"></span>
-            Pre-Opening
+            <span className="w-2 h-2 bg-yellow-600 rounded-full"></span>
+            Mock data
           </span>
         );
-      case 'offline':
+      case 'mixed':
+        return (
+          <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-sm font-medium bg-yellow-100 text-yellow-800">
+            <span className="w-2 h-2 bg-yellow-600 rounded-full"></span>
+            Mixed sources
+          </span>
+        );
+      case 'unavailable':
         return (
           <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-sm font-medium bg-gray-100 text-gray-800">
             <span className="w-2 h-2 bg-gray-600 rounded-full"></span>
-            Market Closed
+            No quote data
           </span>
         );
     }
@@ -180,7 +162,7 @@ export default function MarketPage() {
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-3xl font-bold text-slate-900">Market Overview</h1>
-            <p className="mt-2 text-slate-600">Track top 10 stocks with live market data</p>
+            <p className="mt-2 text-slate-600">Track quotes with their source and cache status</p>
           </div>
         </div>
         <div className="card">
@@ -203,15 +185,15 @@ export default function MarketPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold text-slate-900">Market Overview</h1>
-          <p className="mt-2 text-slate-600">Track top 10 stocks with live market data</p>
+            <p className="mt-2 text-slate-600">Track quotes with their source and cache status</p>
         </div>
-        <div>{getStatusBadge(marketStatus)}</div>
+        <div>{getStatusBadge(feedStatus)}</div>
       </div>
 
       {/* Market Info Card */}
       <MarketStats 
-        status={marketStatus}
-        dataFreshness="Every 5 min"
+        status={feedStatus}
+        dataFreshness="5 minutes"
         stocksTracked={stocksData.length}
       />
 
@@ -280,8 +262,8 @@ export default function MarketPage() {
 
       {/* Last Updated */}
       <div className="text-sm text-slate-600">
-        <p>Last updated: {stocksData[0]?.lastUpdated ? new Date(stocksData[0].lastUpdated).toLocaleTimeString() : 'N/A'}</p>
-        <p>Data refreshes automatically every 5 minutes</p>
+        <p>Latest provider timestamp: {stocksData[0]?.dataTimestamp ? new Date(stocksData[0].dataTimestamp).toLocaleString() : 'Unavailable'}</p>
+        <p>Last checked: {stocksData[0]?.retrievedAt ? new Date(stocksData[0].retrievedAt).toLocaleString() : 'Unavailable'}</p>
       </div>
     </div>
   );

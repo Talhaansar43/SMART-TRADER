@@ -1,50 +1,35 @@
-# Copilot Instructions — smart-trader
+# Copilot Instructions: Smart Trader
 
-> This file provides GitHub Copilot with project-wide context.
-> Keeping this concise and accurate reduces token usage by 20-30%.
-> Last updated: 2026-10-02
+Use this file as the short, stable project map. Check the relevant implementation before relying on these notes; do not reread broad docs when a targeted file answers the question.
 
-## Stack & versions
-- (update with your actual stack)
+## Stack and entry points
+- Frontend: Next.js 14 App Router, React 18, TypeScript, Tailwind CSS. Pages are in `frontend/app`; shared UI in `frontend/components`; API client and utilities in `frontend/lib`; shared types in `frontend/types`.
+- Backend: Python 3.11, FastAPI, SQLAlchemy. App code is under `backend/app`: routers in `api/routes`, business logic in `services`, models in `models`; `main.py` mounts the routers.
+- API routes use `/api/market`, `/api/portfolio`, `/api/trades`, and `/api/analysis`. Health check: `/health`.
+- Frontend API base URL is `NEXT_PUBLIC_API_URL`, defaulting to `http://localhost:8000` (`frontend/lib/api-client.ts`).
+- Backend settings are in `backend/app/config.py`; `.env` is loaded from the backend working directory. Relevant keys include `DATABASE_URL`, `FINNHUB_API_KEY`, `OPENAI_API_KEY`, and `REDIS_URL`. Never put real secrets in source or instructions.
 
-## Project conventions
-- Follow existing naming in the file you're editing
-- Write tests alongside implementation (co-located __tests__ or test_ files)
-- Prefer explicit types over inference for public APIs
-- Financial values: always use Decimal, never float
-- No console.log / print in production paths — use the project logger
+## Runtime notes
+- Windows frontend: `cd frontend`, `npm install` if needed, then `npm run dev` (http://localhost:3000).
+- Windows backend: from the repo root, run `backend\venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000` with working directory `backend`. Create that venv with `py -3.11 -m venv venv`; install `requirements.txt` into it first.
+- Root `backend-dev` uses POSIX `source venv/bin/activate`; use the Windows command above in PowerShell.
+- API docs: `http://localhost:8000/docs`.
+- Market data and caching live in `backend/app/services/market_service.py`. Redis is optional: the service attempts `localhost:6379`, caches price/history/search data for 300 seconds when available, and continues without cache when unavailable. Although `REDIS_URL` exists in settings, this service currently hardcodes the Redis host. Finnhub failures fall back to mock data where available.
 
-## File structure
-```
-
-```
+## Change conventions
+- Follow local style and preserve existing API shapes unless the task requires a contract change. Check callers and types when changing an endpoint or shared type.
+- Use exact decimal arithmetic for new financial calculations where rounding matters; do not blindly change existing API values without checking consumers.
+- Reuse current dependencies and patterns. Add a dependency only when needed and update the appropriate manifest/lockfile.
+- Keep credentials in environment configuration. Use the project logger in backend paths; avoid production debug prints and frontend console logging.
+- Locate the existing test/build setup before adding tests. Run the narrowest relevant check first, then broader required checks when the change warrants them.
 
 ## Token-efficient workflow
-- **Plan first**: Use agent mode to draft a plan before implementation; review it before generating code
-- **Scoped context**: Use #file, #selection, #symbol references — avoid pasting full file contents in chat
-- **Chat hygiene**: Start a new chat (Ctrl+N / Cmd+N) when switching topics; use /compact to summarize long sessions
-- **Forking**: Use /fork or hover → Fork Conversation to explore alternatives without re-establishing full context
-- **Model selection**: Leave model on auto — VS Code routes each request to the most efficient model per task type
-- **Thinking effort**: Use default adaptive thinking; only set to "high" for architectural decisions with genuine complexity
-- **Token visibility**: Use Copilot Agent Debug Logs (Command Palette: "Copilot: Open Chat Debug View") to inspect usage
+- Start from the named file, symbol, failing behavior, or route. Read only its implementation and the nearest caller/test needed to establish the behavior.
+- Search for references before changing shared code; avoid loading whole directories or repeating context already present in this file.
+- Prefer small, local edits and focused validation. Expand exploration only when the local evidence leaves a concrete question unresolved.
+- Treat the README as overview, not authoritative file structure; verify paths and commands against the current workspace.
 
 ## Chat context management
-- When a conversation exceeds **5 exchanges**, treat only the **last 5 user + assistant turns** as active context unless an earlier message is explicitly referenced via #file or #symbol.
-- Discard earlier turns to avoid stale or contradictory instructions creeping back in.
-- To override this limit for a specific request, append `#ctx:N` at the end of your prompt (e.g. `#ctx:3` to use only the last 3 turns, or `#ctx:all` to include the full history).
-- To reset context entirely, start a new chat with `Ctrl+N` / `Cmd+N` rather than continuing a long thread.
-
-### Shorthand reference
-| Shorthand | Meaning |
-|---|---|
-| `#ctx:3` | Use only the last 3 messages as context |
-| `#ctx:5` | Use only the last 5 messages as context (default cap) |
-| `#ctx:all` | Include full conversation history |
-| `#ctx:reset` | Treat this as the start of a fresh conversation |
-
-## Do not
-- Do not use `any` in TypeScript or Python without a `# type: ignore` comment explaining why
-- Do not write migration files manually — use the ORM CLI
-- Do not commit secrets, API keys, or connection strings
-- Do not add dependencies without updating the relevant lock file
-- Do not use float for financial calculations
+- By default, use only the last 5 conversation turns as conversational context for the current request.
+- Append `#ctx:N` to a request to override the default for that request and use the last N conversation turns (for example, `#ctx:3` or `#ctx:10`).
+- Apply an override only to the request that includes it; return to the 5-turn default on the next request.
