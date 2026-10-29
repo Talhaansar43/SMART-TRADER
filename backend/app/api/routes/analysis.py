@@ -45,7 +45,7 @@ async def analyze_stock(
     ):
         raise HTTPException(status_code=422, detail="Invalid stock symbol")
 
-    history = get_stock_history(normalized_symbol, days=400)
+    history = get_stock_history(normalized_symbol, days=400, allow_mock=False)
     quote = get_stock_price(normalized_symbol)
     fundamentals = get_stock_fundamentals(normalized_symbol)
     return analyze_stock_history(normalized_symbol, history, quote, fundamentals)

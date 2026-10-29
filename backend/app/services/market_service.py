@@ -9,6 +9,7 @@ import logging
 import json
 import math
 import redis
+import requests
 from typing import Optional, Dict, List, Any
 from datetime import datetime, timedelta, timezone
 from app.config import settings
@@ -183,13 +184,18 @@ def get_stock_price(symbol: str) -> Dict[str, Any]:
     }
 
 
-def get_stock_history(symbol: str, days: int = 30) -> Dict[str, Any]:
+def get_stock_history(
+    symbol: str,
+    days: int = 30,
+    allow_mock: bool = True,
+) -> Dict[str, Any]:
     """
     Get historical stock data from Finnhub
     
     Args:
         symbol: Stock symbol
-        days: Number of days of history (not supported by Finnhub free tier)
+        days: Calendar days of daily candle history to retrieve
+        allow_mock: Whether to return generated candles after all real sources fail
     
     Returns:
         dict: Historical data
@@ -204,18 +210,25 @@ def get_stock_history(symbol: str, days: int = 30) -> Dict[str, Any]:
                 logger.info(f"✅ Cache HIT for {symbol} history")
                 cached_result = json.loads(cached_data)
                 if isinstance(cached_result, dict):
-                    cached_result["cached"] = True
-                    return cached_result
-                return {
-                    "symbol": symbol,
-                    "days": days,
-                    "data": cached_result,
-                    "cached": True,
-                    "mock": True,
-                    "source": "mock"
-                }
+                    if cached_result.get("mock") is False and cached_result.get("source") in {"finnhub", "yahoo_finance"}:
+                        cached_result["cached"] = True
+                        return cached_result
+                    if allow_mock:
+                        cached_result["cached"] = True
+                        return cached_result
+                elif allow_mock:
+                    return {
+                        "symbol": symbol,
+                        "days": days,
+                        "data": cached_result,
+                        "cached": True,
+                        "mock": True,
+                        "source": "mock"
+                    }
         except Exception as e:
             logger.warning(f"Cache read error: {str(e)}")
+
+    provider_errors = []
     
     if FINNHUB_AVAILABLE and finnhub_client:
         try:
@@ -278,8 +291,97 @@ def get_stock_history(symbol: str, days: int = 30) -> Dict[str, Any]:
                     return result
             else:
                 logger.warning(f"No historical candles available from Finnhub for {symbol}")
+                provider_errors.append("Finnhub returned no historical candles")
         except Exception as e:
             logger.warning(f"Finnhub history unavailable for {symbol}: {str(e)}")
+            provider_errors.append(f"Finnhub: {str(e)}")
+
+    try:
+        end_time = datetime.now(timezone.utc)
+        response = requests.get(
+            f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",
+            params={
+                "period1": int((end_time - timedelta(days=days)).timestamp()),
+                "period2": int(end_time.timestamp()),
+                "interval": "1d",
+            },
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=15,
+        )
+        response.raise_for_status()
+        chart = response.json().get("chart", {})
+        if chart.get("error"):
+            raise ValueError(str(chart["error"].get("description") or "Yahoo chart request failed"))
+        chart_result = (chart.get("result") or [None])[0]
+        if not chart_result:
+            raise ValueError("Yahoo Finance returned no chart data")
+
+        timestamps = chart_result.get("timestamp") or []
+        quote_data = (chart_result.get("indicators", {}).get("quote") or [{}])[0]
+        columns = [quote_data.get(key) or [] for key in ("open", "high", "low", "close", "volume")]
+        if not timestamps or any(len(column) != len(timestamps) for column in columns):
+            raise ValueError("Yahoo Finance returned incomplete candle columns")
+
+        historical_data = []
+        for index, timestamp in enumerate(timestamps):
+            values = [column[index] for column in columns]
+            if timestamp is None or any(value is None for value in values):
+                continue
+            prices = [float(value) for value in values[:4]]
+            volume = float(values[4])
+            if (
+                not isinstance(timestamp, (int, float))
+                or not math.isfinite(timestamp)
+                or timestamp <= 0
+                or any(not math.isfinite(price) or price <= 0 for price in prices)
+                or not math.isfinite(volume)
+                or volume < 0
+            ):
+                raise ValueError("Yahoo Finance returned invalid historical candle data")
+            historical_data.append({
+                "date": datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime("%Y-%m-%d"),
+                "open": prices[0],
+                "high": prices[1],
+                "low": prices[2],
+                "close": prices[3],
+                "volume": volume,
+            })
+
+        dates = [bar["date"] for bar in historical_data]
+        if not dates or dates != sorted(set(dates)):
+            raise ValueError("Yahoo Finance returned unordered or empty daily candles")
+
+        retrieved_at = datetime.now(timezone.utc).isoformat()
+        result = {
+            "symbol": symbol,
+            "days": days,
+            "data": historical_data,
+            "cached": False,
+            "mock": False,
+            "source": "yahoo_finance",
+            "dataTimestamp": f"{dates[-1]}T00:00:00+00:00",
+            "retrievedAt": retrieved_at,
+        }
+        if REDIS_AVAILABLE and redis_client:
+            try:
+                redis_client.setex(cache_key, CACHE_TIMEOUT, json.dumps(result))
+            except Exception as e:
+                logger.warning(f"Cache write error: {str(e)}")
+        return result
+    except Exception as e:
+        logger.warning("Yahoo Finance history unavailable for %s: %s", symbol, e)
+        provider_errors.append(f"Yahoo Finance: {str(e)}")
+
+    if not allow_mock:
+        return {
+            "symbol": symbol,
+            "days": days,
+            "data": [],
+            "cached": False,
+            "mock": False,
+            "source": "unavailable",
+            "error": "; ".join(provider_errors) or "No historical data provider is available",
+        }
 
     logger.info(f"Using mock historical data for {symbol}")
     
@@ -307,7 +409,8 @@ def get_stock_history(symbol: str, days: int = 30) -> Dict[str, Any]:
         "data": historical_data,
         "cached": False,
         "mock": True,
-        "source": "mock"
+        "source": "mock",
+        "providerErrors": provider_errors,
     }
     
     # Cache the historical data
@@ -327,6 +430,7 @@ def get_stock_fundamentals(symbol: str) -> Dict[str, Any]:
         "source": "finnhub" if FINNHUB_AVAILABLE else None,
         "profile": None,
         "metrics": None,
+        "statements": {"latestBalanceSheet": None, "latestAnnual": None, "annualHistory": []},
     }
     if not FINNHUB_AVAILABLE or not finnhub_client:
         return result
@@ -346,6 +450,64 @@ def get_stock_fundamentals(symbol: str) -> Dict[str, Any]:
                 result["metrics"] = metrics
     except Exception as error:
         logger.info("Finnhub financial metrics unavailable for %s: %s", symbol, error)
+
+    def statement_rows(report: Dict[str, Any], key: str) -> List[Dict[str, Any]]:
+        rows = report.get(key, [])
+        return [
+            {"label": row.get("label"), "value": row.get("value")}
+            for row in rows
+            if isinstance(row, dict)
+            and isinstance(row.get("label"), str)
+            and isinstance(row.get("value"), (int, float))
+            and math.isfinite(row["value"])
+        ] if isinstance(rows, list) else []
+
+    try:
+        quarterly = finnhub_client.financials_reported(symbol=symbol, freq="quarterly")
+        quarterly_reports = quarterly.get("data", []) if isinstance(quarterly, dict) else []
+        balance_sheet_reports = [
+            item for item in quarterly_reports
+            if isinstance(item, dict)
+            and isinstance(item.get("report"), dict)
+            and item["report"].get("bs")
+        ]
+        if balance_sheet_reports:
+            latest = max(balance_sheet_reports, key=lambda item: str(item.get("endDate") or ""))
+            result["statements"]["latestBalanceSheet"] = {
+                "asOf": latest.get("endDate"),
+                "rows": statement_rows(latest["report"], "bs"),
+            }
+    except Exception as error:
+        logger.info("Finnhub balance sheet unavailable for %s: %s", symbol, error)
+
+    try:
+        annual = finnhub_client.financials_reported(symbol=symbol, freq="annual")
+        annual_reports = annual.get("data", []) if isinstance(annual, dict) else []
+        complete_reports = [
+            item for item in annual_reports
+            if isinstance(item, dict)
+            and isinstance(item.get("report"), dict)
+            and all(item["report"].get(key) for key in ("bs", "ic", "cf"))
+        ]
+        if complete_reports:
+            latest = max(complete_reports, key=lambda item: str(item.get("endDate") or ""))
+            result["statements"]["latestAnnual"] = {
+                "asOf": latest.get("endDate"),
+                "balanceSheet": statement_rows(latest["report"], "bs"),
+                "incomeStatement": statement_rows(latest["report"], "ic"),
+                "cashFlow": statement_rows(latest["report"], "cf"),
+            }
+            result["statements"]["annualHistory"] = [
+                {
+                    "asOf": item.get("endDate"),
+                    "balanceSheet": statement_rows(item["report"], "bs"),
+                    "incomeStatement": statement_rows(item["report"], "ic"),
+                }
+                for item in sorted(complete_reports, key=lambda report: str(report.get("endDate") or ""))
+                if item.get("endDate")
+            ]
+    except Exception as error:
+        logger.info("Finnhub annual statements unavailable for %s: %s", symbol, error)
 
     return result
 

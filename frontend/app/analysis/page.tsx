@@ -19,12 +19,49 @@ interface PriceHistoryPoint {
   sma200: number | null;
 }
 
+interface ProfitabilityHistoryPoint {
+  period: string;
+  asOf: string;
+  grossProfitMargin: number | null;
+  operatingProfitMargin: number | null;
+  netProfitMargin: number | null;
+  returnOnEquity: number | null;
+  returnOnAssets: number | null;
+  returnOnCapitalEmployed: number | null;
+}
+
+type FinancialKpiKey =
+  | 'grossProfitMargin'
+  | 'operatingProfitMargin'
+  | 'netProfitMargin'
+  | 'returnOnEquity'
+  | 'returnOnAssets'
+  | 'returnOnCapitalEmployed'
+  | 'priceToEarnings'
+  | 'earningsPerShare'
+  | 'priceToSales'
+  | 'priceToBook'
+  | 'ebitda'
+  | 'enterpriseValueToEbitda'
+  | 'debtToEquity'
+  | 'currentRatio'
+  | 'quickRatio'
+  | 'netDebt'
+  | 'freeCashFlow'
+  | 'operatingCashFlow'
+  | 'revenueGrowthRate'
+  | 'inventoryTurnover'
+  | 'assetTurnover'
+  | 'beta'
+  | 'dividendYield';
+
 interface StockAnalysis {
   symbol: string;
   status: 'EVALUATED' | 'NOT_EVALUATED';
   reason: string | null;
   source: string | null;
   mock: boolean | null;
+  historyError: string | null;
   barsUsed: number;
   asOf: string | null;
   evaluatedAt: string;
@@ -57,6 +94,13 @@ interface StockAnalysis {
   } | null;
   company: Record<string, unknown> | null;
   fundamentals: Record<string, number | string | null> | null;
+  financialKpis: Record<FinancialKpiKey, number | null> | null;
+  financialKpiPeriods: {
+    balanceSheet: string | null;
+    annualStatements: string | null;
+    ratioMetrics: string | null;
+  } | null;
+  profitabilityHistory: ProfitabilityHistoryPoint[];
   quote: {
     currentPrice?: number;
     previousClose?: number;
@@ -67,16 +111,64 @@ interface StockAnalysis {
 }
 
 const QUICK_SYMBOLS = ['AAPL', 'MSFT', 'NVDA', 'GOOGL'];
-const FUNDAMENTAL_FIELDS = [
-  ['peTTM', 'P/E (TTM)'],
-  ['epsTTM', 'EPS (TTM)'],
-  ['beta', 'Beta'],
-  ['dividendYieldIndicatedAnnual', 'Dividend yield'],
-  ['roeTTM', 'Return on equity'],
-  ['revenueGrowthTTMYoy', 'Revenue growth (YoY)'],
-  ['52WeekHigh', '52-week high'],
-  ['52WeekLow', '52-week low'],
-] as const;
+const FINANCIAL_KPI_GROUPS: {
+  title: string;
+  metrics: { key: FinancialKpiKey; label: string; format: 'percent' | 'multiple' | 'currency' | 'perShare' | 'number' }[];
+}[] = [
+  {
+    title: 'Profitability & Margins',
+    metrics: [
+      { key: 'grossProfitMargin', label: 'Gross profit margin', format: 'percent' },
+      { key: 'operatingProfitMargin', label: 'Operating profit margin (EBIT)', format: 'percent' },
+      { key: 'netProfitMargin', label: 'Net profit margin', format: 'percent' },
+      { key: 'returnOnEquity', label: 'Return on equity (ROE)', format: 'percent' },
+      { key: 'returnOnAssets', label: 'Return on assets (ROA)', format: 'percent' },
+      { key: 'returnOnCapitalEmployed', label: 'Return on capital employed (ROCE)', format: 'percent' },
+    ],
+  },
+  {
+    title: 'Valuation',
+    metrics: [
+      { key: 'priceToEarnings', label: 'Price-to-earnings (P/E)', format: 'multiple' },
+      { key: 'earningsPerShare', label: 'Earnings per share (EPS)', format: 'perShare' },
+      { key: 'priceToSales', label: 'Price-to-sales (P/S)', format: 'multiple' },
+      { key: 'priceToBook', label: 'Price-to-book (P/B)', format: 'multiple' },
+      { key: 'ebitda', label: 'EBITDA (FY)', format: 'currency' },
+      { key: 'enterpriseValueToEbitda', label: 'EV / EBITDA', format: 'multiple' },
+    ],
+  },
+  {
+    title: 'Financial Health & Solvency',
+    metrics: [
+      { key: 'debtToEquity', label: 'Debt-to-equity (D/E)', format: 'multiple' },
+      { key: 'currentRatio', label: 'Current ratio', format: 'multiple' },
+      { key: 'quickRatio', label: 'Quick ratio', format: 'multiple' },
+      { key: 'netDebt', label: 'Net debt', format: 'currency' },
+    ],
+  },
+  {
+    title: 'Cash Flow',
+    metrics: [
+      { key: 'freeCashFlow', label: 'Free cash flow (FY)', format: 'currency' },
+      { key: 'operatingCashFlow', label: 'Operating cash flow (FY)', format: 'currency' },
+    ],
+  },
+  {
+    title: 'Growth & Efficiency',
+    metrics: [
+      { key: 'revenueGrowthRate', label: 'Revenue growth (YoY)', format: 'percent' },
+      { key: 'inventoryTurnover', label: 'Inventory turnover', format: 'multiple' },
+      { key: 'assetTurnover', label: 'Asset turnover', format: 'multiple' },
+    ],
+  },
+  {
+    title: 'Market Context',
+    metrics: [
+      { key: 'beta', label: 'Beta', format: 'number' },
+      { key: 'dividendYield', label: 'Dividend yield', format: 'percent' },
+    ],
+  },
+];
 
 function formatNumber(value: number | null | undefined, digits = 2) {
   return value == null || !Number.isFinite(value)
@@ -88,13 +180,25 @@ function formatPercent(value: number | null | undefined) {
   return value == null ? 'Unavailable' : `${value > 0 ? '+' : ''}${formatNumber(value)}%`;
 }
 
-function formatMetric(value: number | string | null | undefined) {
-  if (typeof value === 'number' && Number.isFinite(value)) return formatNumber(value);
-  return value == null ? 'Unavailable' : String(value);
+function formatKpi(value: number | null | undefined, format: 'percent' | 'multiple' | 'currency' | 'perShare' | 'number') {
+  if (value == null || !Number.isFinite(value)) return 'Unavailable';
+  if (format === 'percent') return `${formatNumber(value)}%`;
+  if (format === 'multiple') return `${formatNumber(value)}x`;
+  if (format === 'currency') {
+    return new Intl.NumberFormat(undefined, {
+      style: 'currency',
+      currency: 'USD',
+      notation: 'compact',
+      maximumFractionDigits: 2,
+    }).format(value);
+  }
+  if (format === 'perShare') return `$${formatNumber(value)}`;
+  return formatNumber(value);
 }
 
 export default function AnalysisPage() {
   const [symbol, setSymbol] = useState('AAPL');
+  const [profitabilityRange, setProfitabilityRange] = useState<'5Y' | '10Y' | 'ALL'>('10Y');
   const [analysis, setAnalysis] = useState<StockAnalysis | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isEvaluating, setIsEvaluating] = useState(false);
@@ -125,6 +229,10 @@ export default function AnalysisPage() {
   const verified = analysis?.status === 'EVALUATED' && analysis.mock === false;
   const quoteAvailable = analysis?.quote?.source === 'finnhub' && analysis.quote.mock === false;
   const companyName = typeof analysis?.company?.name === 'string' ? analysis.company.name : analysis?.symbol;
+  const profitabilityHistory = analysis?.profitabilityHistory ?? [];
+  const visibleProfitabilityHistory = profitabilityRange === 'ALL'
+    ? profitabilityHistory
+    : profitabilityHistory.slice(-Number(profitabilityRange.slice(0, -1)));
 
   return (
     <div className="mx-auto max-w-7xl space-y-6 pb-8">
@@ -191,7 +299,7 @@ export default function AnalysisPage() {
             </div>
             <div className="text-left sm:text-right">
               <span className={`inline-flex rounded px-2.5 py-1 text-xs font-semibold ${verified ? 'bg-emerald-100 text-emerald-900' : 'bg-amber-100 text-amber-900'}`}>
-                {verified ? `${analysis.source?.toUpperCase()} · VERIFIED HISTORY` : quoteAvailable ? 'FINNHUB QUOTE · HISTORY UNAVAILABLE' : 'VERIFIED DATA UNAVAILABLE'}
+                {verified ? `${analysis.source?.toUpperCase()} · VERIFIED HISTORY` : quoteAvailable ? `FINNHUB QUOTE · ${analysis.source === 'unavailable' ? 'HISTORY UNAVAILABLE' : 'HISTORY NOT VERIFIED'}` : 'VERIFIED DATA UNAVAILABLE'}
               </span>
               <p className="mt-2 text-xs text-slate-500">{analysis.barsUsed} daily candles · Through {analysis.asOf ?? 'unavailable'}</p>
             </div>
@@ -199,7 +307,10 @@ export default function AnalysisPage() {
 
           {!verified && (
             <p role="status" className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-              {analysis.reason?.replaceAll('_', ' ').toLowerCase() ?? 'The provider did not return verifiable historical data.'} Technical analysis is withheld unless the feed provides real, chronologically valid candles.
+              {analysis.historyError
+                ? `Unable to retrieve real historical candles: ${analysis.historyError}`
+                : `${analysis.reason?.replaceAll('_', ' ').toLowerCase() ?? 'The provider did not return verifiable historical data.'}.`}{' '}
+              Technical analysis is withheld unless the feed provides real, chronologically valid candles.
             </p>
           )}
 
@@ -286,22 +397,94 @@ export default function AnalysisPage() {
             </>
           )}
 
-          {(analysis.company || analysis.fundamentals) && (
+          {(analysis.company || analysis.financialKpis) && (
             <section className="border-y border-slate-200 py-5">
               <h3 className="font-semibold text-slate-900">Company fundamentals</h3>
               {analysis.company?.finnhubIndustry && <p className="mt-1 text-sm text-slate-600">{String(analysis.company.finnhubIndustry)}{analysis.company.country ? ` · ${String(analysis.company.country)}` : ''}</p>}
-              {analysis.fundamentals ? (
-                <dl className="mt-4 grid grid-cols-2 gap-x-5 gap-y-4 text-sm sm:grid-cols-4">
-                  {FUNDAMENTAL_FIELDS.map(([key, label]) => (
-                    <div key={key}><dt className="text-slate-500">{label}</dt><dd className="mt-1 font-semibold tabular-nums text-slate-900">{formatMetric(analysis.fundamentals?.[key])}{key === 'dividendYieldIndicatedAnnual' || key === 'revenueGrowthTTMYoy' || key === 'roeTTM' ? '%' : ''}</dd></div>
+              <p className="mt-2 text-xs text-slate-500">
+                Ratios use TTM or the latest reported quarter. Balance sheet: {analysis.financialKpiPeriods?.balanceSheet ?? 'unavailable'}; annual statements: {analysis.financialKpiPeriods?.annualStatements ?? 'unavailable'}.
+              </p>
+              {analysis.financialKpis ? FINANCIAL_KPI_GROUPS.map((group) => (
+                <section key={group.title} className="mt-5 border-t border-slate-200 pt-4">
+                  <h4 className="text-sm font-semibold text-slate-800">{group.title}</h4>
+                  <dl className="mt-3 grid grid-cols-2 gap-x-5 gap-y-4 text-sm sm:grid-cols-3 lg:grid-cols-4">
+                    {group.metrics.map((metric) => (
+                      <div key={metric.key}>
+                        <dt className="text-slate-500">{metric.label}</dt>
+                        <dd className="mt-1 font-semibold tabular-nums text-slate-900">
+                          {formatKpi(analysis.financialKpis?.[metric.key], metric.format)}
+                        </dd>
+                      </div>
+                    ))}
+                  </dl>
+                </section>
+              )) : <p className="mt-3 text-sm text-slate-600">Financial KPIs are not available from the current provider.</p>}
+            </section>
+          )}
+
+          {analysis.profitabilityHistory.length > 0 && (
+            <section className="border-y border-slate-200 py-5">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <h3 className="font-semibold text-slate-900">Profitability over time</h3>
+                  <p className="mt-1 text-xs text-slate-500">
+                    Annual filing ratios. Returns use reported year-end balance sheet values; missing statement items are shown as gaps.
+                  </p>
+                </div>
+                <div className="inline-flex self-start rounded-md border border-slate-300 p-0.5" role="group" aria-label="Profitability chart range">
+                  {(['5Y', '10Y', 'ALL'] as const).map((range) => (
+                    <button
+                      key={range}
+                      type="button"
+                      aria-pressed={profitabilityRange === range}
+                      onClick={() => setProfitabilityRange(range)}
+                      className={`min-w-12 rounded px-2.5 py-1.5 text-xs font-semibold transition-colors ${profitabilityRange === range ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+                    >
+                      {range === 'ALL' ? 'All' : range}
+                    </button>
                   ))}
-                </dl>
-              ) : <p className="mt-3 text-sm text-slate-600">Fundamental metrics are not available from the current provider or plan.</p>}
+                </div>
+              </div>
+
+              <div className="mt-5 grid gap-6 xl:grid-cols-2">
+                <div className="min-w-0">
+                  <h4 className="mb-2 text-sm font-medium text-slate-800">Margins</h4>
+                  <div className="h-[270px] w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={visibleProfitabilityHistory} margin={{ top: 8, right: 12, bottom: 4, left: 4 }}>
+                        <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
+                        <XAxis dataKey="period" tick={{ fontSize: 11 }} />
+                        <YAxis width={48} tickFormatter={(value: number) => `${value}%`} tick={{ fontSize: 11 }} />
+                        <Tooltip labelFormatter={(value) => `Fiscal year ${value}`} formatter={(value: number, name: string) => [`${formatNumber(value)}%`, name]} />
+                        <Line type="monotone" dataKey="grossProfitMargin" name="Gross margin" stroke="#047857" strokeWidth={2} dot={{ r: 2 }} connectNulls={false} />
+                        <Line type="monotone" dataKey="operatingProfitMargin" name="Operating margin" stroke="#0369a1" strokeWidth={2} dot={{ r: 2 }} connectNulls={false} />
+                        <Line type="monotone" dataKey="netProfitMargin" name="Net margin" stroke="#d97706" strokeWidth={2} dot={{ r: 2 }} connectNulls={false} />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+                <div className="min-w-0">
+                  <h4 className="mb-2 text-sm font-medium text-slate-800">Returns</h4>
+                  <div className="h-[270px] w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={visibleProfitabilityHistory} margin={{ top: 8, right: 12, bottom: 4, left: 4 }}>
+                        <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
+                        <XAxis dataKey="period" tick={{ fontSize: 11 }} />
+                        <YAxis width={48} tickFormatter={(value: number) => `${value}%`} tick={{ fontSize: 11 }} />
+                        <Tooltip labelFormatter={(value) => `Fiscal year ${value}`} formatter={(value: number, name: string) => [`${formatNumber(value)}%`, name]} />
+                        <Line type="monotone" dataKey="returnOnEquity" name="ROE" stroke="#be123c" strokeWidth={2} dot={{ r: 2 }} connectNulls={false} />
+                        <Line type="monotone" dataKey="returnOnAssets" name="ROA" stroke="#7c3aed" strokeWidth={2} dot={{ r: 2 }} connectNulls={false} />
+                        <Line type="monotone" dataKey="returnOnCapitalEmployed" name="ROCE" stroke="#475569" strokeWidth={2} dot={{ r: 2 }} connectNulls={false} />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+              </div>
             </section>
           )}
 
           <footer className="flex flex-col gap-1 text-xs text-slate-500 sm:flex-row sm:justify-between">
-            <span>Source: {analysis.source ?? 'Unavailable'} · {analysis.barsUsed} candles · As of {analysis.asOf ?? 'unavailable'}</span>
+            <span>Source: {analysis.source ?? 'Unavailable'} · {analysis.barsUsed} real candles · As of {analysis.asOf ?? 'unavailable'}</span>
             <span>Calculated {new Date(analysis.evaluatedAt).toLocaleString()}</span>
           </footer>
         </div>
