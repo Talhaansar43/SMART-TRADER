@@ -5,13 +5,18 @@ Dependencies: finnhub, requests, redis
 Related Files: app/api/routes/market.py, app/config.py
 """
 
-import finnhub
 import logging
 import json
+import math
 import redis
 from typing import Optional, Dict, List, Any
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from app.config import settings
+import truststore
+
+truststore.inject_into_ssl()
+
+import finnhub
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +58,7 @@ def get_mock_price(symbol: str) -> Optional[Dict[str, Any]]:
     if symbol in MOCK_STOCKS:
         stock = MOCK_STOCKS[symbol]
         import random
+        retrieved_at = datetime.now(timezone.utc).isoformat()
         return {
             "symbol": symbol,
             "currentPrice": stock["currentPrice"] + random.uniform(-2, 2),
@@ -63,7 +69,9 @@ def get_mock_price(symbol: str) -> Optional[Dict[str, Any]]:
             "marketCap": "N/A",
             "pe": round(random.uniform(15, 40), 2),
             "eps": round(random.uniform(2, 15), 2),
-            "lastUpdated": datetime.now().isoformat(),
+            "lastUpdated": retrieved_at,
+            "dataTimestamp": None,
+            "retrievedAt": retrieved_at,
             "cached": False,
             "mock": True,
             "source": "mock",
@@ -103,11 +111,24 @@ def get_stock_price(symbol: str) -> Dict[str, Any]:
             
             # Get quote data
             quote = finnhub_client.quote(symbol)
+            current_price = quote.get('c') if quote else None
+            quote_timestamp = quote.get('t') if quote else None
             
-            if quote and 'c' in quote:  # 'c' is the current price
+            if (
+                isinstance(current_price, (int, float))
+                and math.isfinite(current_price)
+                and current_price > 0
+                and isinstance(quote_timestamp, (int, float))
+                and math.isfinite(quote_timestamp)
+                and quote_timestamp > 0
+            ):
+                retrieved_at = datetime.now(timezone.utc).isoformat()
+                data_timestamp = datetime.fromtimestamp(
+                    quote_timestamp, tz=timezone.utc
+                ).isoformat()
                 result = {
                     "symbol": symbol,
-                    "currentPrice": quote.get('c'),
+                    "currentPrice": current_price,
                     "open": quote.get('o'),
                     "high": quote.get('h'),
                     "low": quote.get('l'),
@@ -116,7 +137,9 @@ def get_stock_price(symbol: str) -> Dict[str, Any]:
                     "marketCap": "N/A",
                     "pe": None,
                     "eps": None,
-                    "lastUpdated": datetime.now().isoformat(),
+                    "lastUpdated": data_timestamp,
+                    "dataTimestamp": data_timestamp,
+                    "retrievedAt": retrieved_at,
                     "cached": False,
                     "mock": False,
                     "source": "finnhub",
@@ -134,7 +157,7 @@ def get_stock_price(symbol: str) -> Dict[str, Any]:
                 return result
             else:
                 logger.warning(f"Invalid response from Finnhub for {symbol}")
-                raise Exception("No quote data returned")
+                raise ValueError("Finnhub returned no valid price or quote timestamp")
                 
         except Exception as e:
             logger.error(f"Error fetching from Finnhub for {symbol}: {str(e)}")
@@ -179,21 +202,88 @@ def get_stock_history(symbol: str, days: int = 30) -> Dict[str, Any]:
             cached_data = redis_client.get(cache_key)
             if cached_data:
                 logger.info(f"✅ Cache HIT for {symbol} history")
+                cached_result = json.loads(cached_data)
+                if isinstance(cached_result, dict):
+                    cached_result["cached"] = True
+                    return cached_result
                 return {
                     "symbol": symbol,
                     "days": days,
-                    "data": json.loads(cached_data),
-                    "cached": True
+                    "data": cached_result,
+                    "cached": True,
+                    "mock": True,
+                    "source": "mock"
                 }
         except Exception as e:
             logger.warning(f"Cache read error: {str(e)}")
     
-    # Finnhub free tier doesn't include historical data
-    # Use mock historical data for now
-    logger.info(f"📡 Finnhub free tier - using mock historical data for {symbol}")
+    if FINNHUB_AVAILABLE and finnhub_client:
+        try:
+            end_time = datetime.now(timezone.utc)
+            start_time = end_time - timedelta(days=days)
+            candles = finnhub_client.stock_candles(
+                symbol,
+                "D",
+                int(start_time.timestamp()),
+                int(end_time.timestamp())
+            )
+
+            if candles and candles.get("s") == "ok":
+                timestamps = candles.get("t", [])
+                columns = [candles.get(key, []) for key in ("o", "h", "l", "c", "v")]
+                if timestamps and all(len(column) == len(timestamps) for column in columns):
+                    historical_data = []
+                    for index, timestamp in enumerate(timestamps):
+                        prices = [float(column[index]) for column in columns[:4]]
+                        if (
+                            not isinstance(timestamp, (int, float))
+                            or not math.isfinite(timestamp)
+                            or timestamp <= 0
+                            or any(not math.isfinite(price) or price <= 0 for price in prices)
+                        ):
+                            raise ValueError("Finnhub returned invalid historical candle data")
+
+                        historical_data.append({
+                            "date": datetime.fromtimestamp(
+                                timestamp, tz=timezone.utc
+                            ).strftime("%Y-%m-%d"),
+                            "open": prices[0],
+                            "high": prices[1],
+                            "low": prices[2],
+                            "close": prices[3],
+                            "volume": candles["v"][index]
+                        })
+
+                    dates = [bar["date"] for bar in historical_data]
+                    if dates != sorted(set(dates)):
+                        raise ValueError("Finnhub returned unordered historical candles")
+
+                    retrieved_at = datetime.now(timezone.utc).isoformat()
+                    result = {
+                        "symbol": symbol,
+                        "days": days,
+                        "data": historical_data,
+                        "cached": False,
+                        "mock": False,
+                        "source": "finnhub",
+                        "dataTimestamp": f"{dates[-1]}T00:00:00+00:00",
+                        "retrievedAt": retrieved_at
+                    }
+
+                    if REDIS_AVAILABLE and redis_client:
+                        try:
+                            redis_client.setex(cache_key, CACHE_TIMEOUT, json.dumps(result))
+                        except Exception as e:
+                            logger.warning(f"Cache write error: {str(e)}")
+                    return result
+            else:
+                logger.warning(f"No historical candles available from Finnhub for {symbol}")
+        except Exception as e:
+            logger.warning(f"Finnhub history unavailable for {symbol}: {str(e)}")
+
+    logger.info(f"Using mock historical data for {symbol}")
     
     historical_data = []
-    from datetime import timedelta
     import random
     
     base_price = 150.0
@@ -215,17 +305,48 @@ def get_stock_history(symbol: str, days: int = 30) -> Dict[str, Any]:
         "symbol": symbol,
         "days": days,
         "data": historical_data,
-        "cached": False
+        "cached": False,
+        "mock": True,
+        "source": "mock"
     }
     
     # Cache the historical data
     if REDIS_AVAILABLE and redis_client:
         try:
-            redis_client.setex(cache_key, CACHE_TIMEOUT, json.dumps(historical_data))
+            redis_client.setex(cache_key, CACHE_TIMEOUT, json.dumps(result))
             logger.info(f"💾 Cached historical data for {symbol}")
         except Exception as e:
             logger.warning(f"Cache write error: {str(e)}")
     
+    return result
+
+
+def get_stock_fundamentals(symbol: str) -> Dict[str, Any]:
+    """Fetch company profile and basic financial metrics when Finnhub permits."""
+    result: Dict[str, Any] = {
+        "source": "finnhub" if FINNHUB_AVAILABLE else None,
+        "profile": None,
+        "metrics": None,
+    }
+    if not FINNHUB_AVAILABLE or not finnhub_client:
+        return result
+
+    try:
+        profile = finnhub_client.company_profile2(symbol=symbol)
+        if isinstance(profile, dict) and profile:
+            result["profile"] = profile
+    except Exception as error:
+        logger.info("Finnhub profile unavailable for %s: %s", symbol, error)
+
+    try:
+        financials = finnhub_client.company_basic_financials(symbol, "all")
+        if isinstance(financials, dict):
+            metrics = financials.get("metric")
+            if isinstance(metrics, dict):
+                result["metrics"] = metrics
+    except Exception as error:
+        logger.info("Finnhub financial metrics unavailable for %s: %s", symbol, error)
+
     return result
 
 

@@ -5,14 +5,50 @@ Dependencies: fastapi, openai, langchain
 Related Files: app/services/analysis_service.py
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from app.database import get_db
+from app.services.market_service import get_stock_fundamentals, get_stock_history, get_stock_price
+from app.services.strategy_service import analyze_stock_history, evaluate_sma_crossover
 import logging
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+@router.get("/signals/evaluate")
+async def evaluate_signal(
+    symbol: str = Query(..., min_length=1, max_length=12)
+):
+    """Evaluate and log a read-only SMA baseline for a single symbol."""
+    normalized_symbol = symbol.strip().upper()
+    if not normalized_symbol or any(
+        not (character.isalnum() or character in ".-")
+        for character in normalized_symbol
+    ):
+        raise HTTPException(status_code=422, detail="Invalid stock symbol")
+
+    history = get_stock_history(normalized_symbol, days=365)
+    return evaluate_sma_crossover(normalized_symbol, history)
+
+
+@router.get("/stocks/analyze")
+async def analyze_stock(
+    symbol: str = Query(..., min_length=1, max_length=12)
+):
+    """Return verified technical analysis and optional live company data."""
+    normalized_symbol = symbol.strip().upper()
+    if not normalized_symbol or any(
+        not (character.isalnum() or character in ".-")
+        for character in normalized_symbol
+    ):
+        raise HTTPException(status_code=422, detail="Invalid stock symbol")
+
+    history = get_stock_history(normalized_symbol, days=400)
+    quote = get_stock_price(normalized_symbol)
+    fundamentals = get_stock_fundamentals(normalized_symbol)
+    return analyze_stock_history(normalized_symbol, history, quote, fundamentals)
 
 # Mock data
 mock_suggestions = [

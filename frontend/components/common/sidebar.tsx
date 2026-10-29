@@ -32,7 +32,7 @@ export function Sidebar() {
   const pathname = usePathname();
 
   return (
-    <aside className="w-64 border-r border-slate-200 bg-white p-4">
+    <aside className="w-14 shrink-0 border-r border-slate-200 bg-white p-2 md:w-64 md:p-4">
       <nav className="space-y-2">
         {menuItems.map((item) => {
           const isActive = pathname.startsWith(item.href);
@@ -42,14 +42,14 @@ export function Sidebar() {
             <Link
               key={item.href}
               href={item.href}
-              className={`flex items-center gap-3 rounded-lg px-4 py-3 font-medium transition-colors ${
+              className={`flex items-center justify-center gap-3 rounded-lg px-2 py-3 font-medium transition-colors md:justify-start md:px-4 ${
                 isActive
                   ? 'bg-green-50 text-green-700'
                   : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
               }`}
             >
               <Icon className="h-5 w-5" />
-              <span>{item.label}</span>
+              <span className="sr-only md:not-sr-only">{item.label}</span>
             </Link>
           );
         })}
@@ -60,10 +60,10 @@ export function Sidebar() {
       <div className="space-y-2">
         <Link
           href="/help"
-          className="flex items-center gap-3 rounded-lg px-4 py-3 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-50"
+          className="flex items-center justify-center gap-3 rounded-lg px-2 py-3 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-50 md:justify-start md:px-4"
         >
           <HelpCircle className="h-5 w-5" />
-          Help & Support
+          <span className="sr-only md:not-sr-only">Help &amp; Support</span>
         </Link>
       </div>
     </aside>
