@@ -10,6 +10,7 @@
 import { useState } from 'react';
 import { PlaceOrderForm } from '@/components/trades/place-order-form';
 import { ActiveOrders } from '@/components/trades/active-orders';
+import { PaperTradingBot } from '@/components/trades/paper-trading-bot';
 import { useTradeHistory } from '@/lib/hooks';
 import { Loading } from '@/components/common/loading';
 import { Error } from '@/components/common/error';
@@ -74,6 +75,8 @@ export default function TradesPage() {
           {showOrderForm ? 'Cancel' : '+ Place Order'}
         </button>
       </div>
+
+      <PaperTradingBot />
 
       {/* Place Order Form */}
       {showOrderForm && (

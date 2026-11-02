@@ -9,8 +9,10 @@ from fastapi import APIRouter, Depends, HTTPException, Body
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from app.database import get_db
+from app.services.paper_trading_bot import normalize_bot_symbol, paper_trading_bot
 from typing import List
 from enum import Enum
+from decimal import Decimal
 import logging
 
 logger = logging.getLogger(__name__)
@@ -55,6 +57,43 @@ class OrderResponse(BaseModel):
     orderType: str
     status: str
     createdAt: str
+
+class PaperBotStartRequest(BaseModel):
+    symbol: str = Field(..., min_length=1, max_length=12)
+    quantity: int = Field(..., gt=0, le=10000)
+    initialCash: Decimal = Field(..., gt=0, le=1000000)
+    intervalSeconds: int = Field(300, ge=300, le=86400)
+
+
+@router.get("/bot/status")
+async def get_paper_bot_status():
+    """Return the in-memory status and simulated trade ledger."""
+    return paper_trading_bot.status()
+
+
+@router.post("/bot/start")
+async def start_paper_bot(request: PaperBotStartRequest):
+    """Start the paper-only SMA bot; this endpoint never submits broker orders."""
+    try:
+        symbol = normalize_bot_symbol(request.symbol)
+        paper_trading_bot.start(
+            symbol=symbol,
+            quantity=request.quantity,
+            starting_cash=request.initialCash,
+            interval_seconds=request.intervalSeconds,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return paper_trading_bot.status()
+
+
+@router.post("/bot/stop")
+async def stop_paper_bot():
+    """Stop future paper evaluations without liquidating the simulated position."""
+    paper_trading_bot.stop()
+    return paper_trading_bot.status()
 
 # Mock trade history
 mock_trades = [
