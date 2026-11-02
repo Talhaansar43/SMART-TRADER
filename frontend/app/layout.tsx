@@ -17,14 +17,14 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className="bg-slate-50">
+      <body className="bg-slate-50 text-slate-900">
         <Providers>
-          <div className="flex h-screen flex-col">
+          <div className="flex h-screen flex-col bg-slate-50">
             <Navbar />
-            <div className="flex flex-1 overflow-hidden">
+            <div className="flex min-h-0 flex-1 overflow-hidden">
               <Sidebar />
-              <main className="flex-1 overflow-auto">
-                <div className="p-6">
+              <main id="main-content" className="min-w-0 flex-1 overflow-auto">
+                <div className="mx-auto w-full max-w-[1600px] px-4 py-5 sm:px-6 lg:px-8">
                   {children}
                 </div>
               </main>

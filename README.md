@@ -145,6 +145,11 @@ cp .env.example .env
 # Update .env with your PostgreSQL credentials
 nano .env
 
+# Optional company news feeds:
+# Set BENZINGA_API_KEY and MASSIVE_API_KEY to enable those providers.
+# Set SEC_CONTACT_EMAIL to a monitored email address for SEC EDGAR requests.
+# Reuters/LSEG and Dow Jones require separate licensed feed access.
+
 # Initialize database
 python -c "from app.database import init_db; init_db()"
 

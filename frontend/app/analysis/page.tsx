@@ -1,6 +1,7 @@
 'use client';
 
 import { FormEvent, useState } from 'react';
+import { ChevronDown, ExternalLink } from 'lucide-react';
 import {
   CartesianGrid,
   Line,
@@ -30,6 +31,34 @@ interface ProfitabilityHistoryPoint {
   returnOnCapitalEmployed: number | null;
 }
 
+interface CompanyNewsItem {
+  id: string;
+  headline: string;
+  summary: string;
+  source: string;
+  provider: string;
+  category: 'news' | 'filing';
+  url: string | null;
+  datetime: number;
+  tone: 'POSITIVE' | 'NEGATIVE' | 'MIXED' | 'NEUTRAL';
+  toneSignals: string[];
+}
+
+interface NewsProviderStatus {
+  id: string;
+  name: string;
+  status: 'connected' | 'setup_required' | 'license_required' | 'unavailable';
+  articleCount: number;
+}
+
+interface CompanyNewsResponse {
+  symbol: string;
+  items: CompanyNewsItem[];
+  providers: NewsProviderStatus[];
+  source: 'aggregated' | 'unavailable';
+  cached: boolean;
+}
+
 type FinancialKpiKey =
   | 'grossProfitMargin'
   | 'operatingProfitMargin'
@@ -53,7 +82,36 @@ type FinancialKpiKey =
   | 'inventoryTurnover'
   | 'assetTurnover'
   | 'beta'
-  | 'dividendYield';
+  | 'dividendYield'
+  | 'revenue'
+  | 'grossProfit'
+  | 'operatingIncome'
+  | 'netIncome';
+
+interface QuarterlyFinancialHistoryPoint {
+  fiscalYear: number;
+  quarter: number;
+  period: string;
+  asOf: string;
+  kpis: Record<FinancialKpiKey, number | null>;
+}
+
+interface ProfitChartPoint {
+  fiscalYear: number;
+  quarter: number;
+  period: string;
+  grossProfit: number | null;
+  operatingIncome: number | null;
+  netIncome: number | null;
+}
+
+interface ProfitChangeDotProps {
+  cx?: number;
+  cy?: number;
+  payload?: ProfitChartPoint;
+  profitKey: keyof Pick<ProfitChartPoint, 'grossProfit' | 'operatingIncome' | 'netIncome'>;
+  history: ProfitChartPoint[];
+}
 
 interface StockAnalysis {
   symbol: string;
@@ -95,6 +153,7 @@ interface StockAnalysis {
   company: Record<string, unknown> | null;
   fundamentals: Record<string, number | string | null> | null;
   financialKpis: Record<FinancialKpiKey, number | null> | null;
+  quarterlyFinancialHistory: QuarterlyFinancialHistoryPoint[];
   financialKpiPeriods: {
     balanceSheet: string | null;
     annualStatements: string | null;
@@ -118,9 +177,16 @@ const FINANCIAL_KPI_GROUPS: {
   {
     title: 'Profitability & Margins',
     metrics: [
-      { key: 'grossProfitMargin', label: 'Gross profit margin', format: 'percent' },
-      { key: 'operatingProfitMargin', label: 'Operating profit margin (EBIT)', format: 'percent' },
-      { key: 'netProfitMargin', label: 'Net profit margin', format: 'percent' },
+      { key: 'revenue', label: 'Revenue', format: 'currency' },
+      { key: 'grossProfit', label: 'Gross profit', format: 'currency' },
+      { key: 'operatingIncome', label: 'Operating income', format: 'currency' },
+      { key: 'netIncome', label: 'Net income', format: 'currency' },
+      { key: 'earningsPerShare', label: 'Diluted EPS', format: 'perShare' },
+    ],
+  },
+  {
+    title: 'Returns',
+    metrics: [
       { key: 'returnOnEquity', label: 'Return on equity (ROE)', format: 'percent' },
       { key: 'returnOnAssets', label: 'Return on assets (ROA)', format: 'percent' },
       { key: 'returnOnCapitalEmployed', label: 'Return on capital employed (ROCE)', format: 'percent' },
@@ -129,12 +195,7 @@ const FINANCIAL_KPI_GROUPS: {
   {
     title: 'Valuation',
     metrics: [
-      { key: 'priceToEarnings', label: 'Price-to-earnings (P/E)', format: 'multiple' },
-      { key: 'earningsPerShare', label: 'Earnings per share (EPS)', format: 'perShare' },
-      { key: 'priceToSales', label: 'Price-to-sales (P/S)', format: 'multiple' },
-      { key: 'priceToBook', label: 'Price-to-book (P/B)', format: 'multiple' },
-      { key: 'ebitda', label: 'EBITDA (FY)', format: 'currency' },
-      { key: 'enterpriseValueToEbitda', label: 'EV / EBITDA', format: 'multiple' },
+      { key: 'ebitda', label: 'Quarterly EBITDA', format: 'currency' },
     ],
   },
   {
@@ -149,8 +210,8 @@ const FINANCIAL_KPI_GROUPS: {
   {
     title: 'Cash Flow',
     metrics: [
-      { key: 'freeCashFlow', label: 'Free cash flow (FY)', format: 'currency' },
-      { key: 'operatingCashFlow', label: 'Operating cash flow (FY)', format: 'currency' },
+      { key: 'freeCashFlow', label: 'Free cash flow', format: 'currency' },
+      { key: 'operatingCashFlow', label: 'Operating cash flow', format: 'currency' },
     ],
   },
   {
@@ -161,13 +222,19 @@ const FINANCIAL_KPI_GROUPS: {
       { key: 'assetTurnover', label: 'Asset turnover', format: 'multiple' },
     ],
   },
-  {
-    title: 'Market Context',
-    metrics: [
-      { key: 'beta', label: 'Beta', format: 'number' },
-      { key: 'dividendYield', label: 'Dividend yield', format: 'percent' },
-    ],
-  },
+];
+
+const CURRENT_MARKET_KPI_METRICS: {
+  key: FinancialKpiKey;
+  label: string;
+  format: 'percent' | 'multiple' | 'currency' | 'perShare' | 'number';
+}[] = [
+  { key: 'priceToEarnings', label: 'Price-to-earnings (P/E)', format: 'multiple' },
+  { key: 'priceToSales', label: 'Price-to-sales (P/S)', format: 'multiple' },
+  { key: 'priceToBook', label: 'Price-to-book (P/B)', format: 'multiple' },
+  { key: 'enterpriseValueToEbitda', label: 'EV / EBITDA', format: 'multiple' },
+  { key: 'beta', label: 'Beta', format: 'number' },
+  { key: 'dividendYield', label: 'Dividend yield', format: 'percent' },
 ];
 
 function formatNumber(value: number | null | undefined, digits = 2) {
@@ -178,6 +245,33 @@ function formatNumber(value: number | null | undefined, digits = 2) {
 
 function formatPercent(value: number | null | undefined) {
   return value == null ? 'Unavailable' : `${value > 0 ? '+' : ''}${formatNumber(value)}%`;
+}
+
+function getNewsPriceReaction(item: CompanyNewsItem, history: PriceHistoryPoint[]) {
+  const dateParts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(new Date(item.datetime * 1000));
+  const part = (type: string) => dateParts.find((datePart) => datePart.type === type)?.value ?? '';
+  const publishedDate = `${part('year')}-${part('month')}-${part('day')}`;
+  const publishedAfterClose = Number(part('hour')) >= 16;
+  const closeIndex = history.findIndex((point) => (
+    point.date > publishedDate || (!publishedAfterClose && point.date === publishedDate)
+  ));
+
+  if (closeIndex < 1) return null;
+  const previousClose = history[closeIndex - 1].close;
+  const nextClose = history[closeIndex].close;
+  if (previousClose <= 0 || !Number.isFinite(nextClose)) return null;
+
+  return {
+    date: history[closeIndex].date,
+    changePct: (nextClose / previousClose - 1) * 100,
+  };
 }
 
 function formatKpi(value: number | null | undefined, format: 'percent' | 'multiple' | 'currency' | 'perShare' | 'number') {
@@ -196,43 +290,139 @@ function formatKpi(value: number | null | undefined, format: 'percent' | 'multip
   return formatNumber(value);
 }
 
+function formatQuarterChange(
+  current: number | null | undefined,
+  previous: number | null | undefined,
+  format: 'percent' | 'multiple' | 'currency' | 'perShare' | 'number',
+) {
+  if (current == null || previous == null || !Number.isFinite(current) || !Number.isFinite(previous)) {
+    return { label: 'No prior quarter', className: 'text-slate-500' };
+  }
+  const delta = current - previous;
+  const sign = delta > 0 ? '+' : delta < 0 ? '-' : '';
+  return {
+    label: `${sign}${formatKpi(Math.abs(delta), format)} QoQ`,
+    className: delta > 0 ? 'text-emerald-700' : delta < 0 ? 'text-rose-700' : 'text-slate-500',
+  };
+}
+
+function getQuarterSignalColor(current: number | null, previous: number | null) {
+  if (current == null || previous == null) return '#d97706';
+  if (current > previous) return '#16803d';
+  if (current < previous) return '#be123c';
+  return '#d97706';
+}
+
+function ProfitChangeDot({ cx, cy, payload, profitKey, history }: ProfitChangeDotProps) {
+  if (cx == null || cy == null || !payload) return <g />;
+  const historyIndex = history.findIndex((point) => point.period === payload.period);
+  const previousValue = historyIndex > 0 ? history[historyIndex - 1][profitKey] : null;
+  const currentValue = payload[profitKey];
+
+  return (
+    <circle
+      cx={cx}
+      cy={cy}
+      r={4}
+      fill={getQuarterSignalColor(currentValue, previousValue)}
+      stroke="#ffffff"
+      strokeWidth={2}
+    />
+  );
+}
+
 export default function AnalysisPage() {
   const [symbol, setSymbol] = useState('AAPL');
-  const [profitabilityRange, setProfitabilityRange] = useState<'5Y' | '10Y' | 'ALL'>('10Y');
+  const [profitabilityRange, setProfitabilityRange] = useState<'4Q' | '8Q' | '12Q' | 'ALL'>('12Q');
+  const [kpiRange, setKpiRange] = useState<'4Q' | '8Q' | '12Q' | 'ALL'>('8Q');
+  const [selectedKpiGroup, setSelectedKpiGroup] = useState(FINANCIAL_KPI_GROUPS[0].title);
   const [analysis, setAnalysis] = useState<StockAnalysis | null>(null);
+  const [companyNews, setCompanyNews] = useState<CompanyNewsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [newsError, setNewsError] = useState<string | null>(null);
   const [isEvaluating, setIsEvaluating] = useState(false);
+  const [isLoadingNews, setIsLoadingNews] = useState(false);
 
   async function handleEvaluate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setIsEvaluating(true);
+    setIsLoadingNews(true);
     setError(null);
+    setNewsError(null);
     setAnalysis(null);
+    setCompanyNews(null);
 
-    try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-      const response = await fetch(
-        `${apiUrl}/api/analysis/stocks/analyze?symbol=${encodeURIComponent(symbol.trim())}`
-      );
-      if (!response.ok) {
-        const detail = await response.json().catch(() => null);
-        throw new Error(detail?.detail ?? `Analysis request failed (${response.status})`);
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+    const normalizedSymbol = symbol.trim().toUpperCase();
+    const analysisRequest = (async () => {
+      try {
+        const response = await fetch(
+          `${apiUrl}/api/analysis/stocks/analyze?symbol=${encodeURIComponent(normalizedSymbol)}`
+        );
+        if (!response.ok) {
+          const detail = await response.json().catch(() => null);
+          throw new Error(detail?.detail ?? `Analysis request failed (${response.status})`);
+        }
+        setAnalysis(await response.json());
+      } catch (requestError) {
+        setError(requestError instanceof Error ? requestError.message : 'Analysis request failed');
+      } finally {
+        setIsEvaluating(false);
       }
-      setAnalysis(await response.json());
-    } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : 'Analysis request failed');
-    } finally {
-      setIsEvaluating(false);
-    }
+    })();
+    const newsRequest = (async () => {
+      try {
+        const response = await fetch(
+          `${apiUrl}/api/analysis/stocks/news?symbol=${encodeURIComponent(normalizedSymbol)}&limit=10`
+        );
+        if (!response.ok) throw new Error(`News request failed (${response.status})`);
+        setCompanyNews(await response.json());
+      } catch (requestError) {
+        setNewsError(requestError instanceof Error ? requestError.message : 'Company news is unavailable');
+      } finally {
+        setIsLoadingNews(false);
+      }
+    })();
+    await Promise.all([analysisRequest, newsRequest]);
   }
 
   const verified = analysis?.status === 'EVALUATED' && analysis.mock === false;
   const quoteAvailable = analysis?.quote?.source === 'finnhub' && analysis.quote.mock === false;
   const companyName = typeof analysis?.company?.name === 'string' ? analysis.company.name : analysis?.symbol;
-  const profitabilityHistory = analysis?.profitabilityHistory ?? [];
+  const quarterlyFinancialHistory = analysis?.quarterlyFinancialHistory ?? [];
+  const visibleQuarterlyHistory = (kpiRange === 'ALL'
+    ? quarterlyFinancialHistory
+    : quarterlyFinancialHistory.slice(-Number(kpiRange.slice(0, -1))))
+    .slice()
+    .reverse();
+  const profitChartHistory: ProfitChartPoint[] = quarterlyFinancialHistory.map((period) => ({
+    fiscalYear: period.fiscalYear,
+    quarter: period.quarter,
+    period: period.period,
+    grossProfit: period.kpis.grossProfit,
+    operatingIncome: period.kpis.operatingIncome,
+    netIncome: period.kpis.netIncome,
+  }));
+  const visibleQuarterlyTrendHistory = profitabilityRange === 'ALL'
+    ? profitChartHistory
+    : profitChartHistory.slice(-Number(profitabilityRange.slice(0, -1)));
+  const profitabilityHistory: ProfitabilityHistoryPoint[] = quarterlyFinancialHistory.map((period) => ({
+    period: period.period,
+    asOf: period.asOf,
+    grossProfitMargin: period.kpis.grossProfitMargin,
+    operatingProfitMargin: period.kpis.operatingProfitMargin,
+    netProfitMargin: period.kpis.netProfitMargin,
+    returnOnEquity: period.kpis.returnOnEquity,
+    returnOnAssets: period.kpis.returnOnAssets,
+    returnOnCapitalEmployed: period.kpis.returnOnCapitalEmployed,
+  }));
   const visibleProfitabilityHistory = profitabilityRange === 'ALL'
     ? profitabilityHistory
     : profitabilityHistory.slice(-Number(profitabilityRange.slice(0, -1)));
+  const latestQuarter = quarterlyFinancialHistory[quarterlyFinancialHistory.length - 1];
+  const previousQuarter = quarterlyFinancialHistory[quarterlyFinancialHistory.length - 2];
+  const activeKpiGroup = FINANCIAL_KPI_GROUPS.find((group) => group.title === selectedKpiGroup)
+    ?? FINANCIAL_KPI_GROUPS[0];
 
   return (
     <div className="mx-auto max-w-7xl space-y-6 pb-8">
@@ -314,7 +504,7 @@ export default function AnalysisPage() {
             </p>
           )}
 
-          {verified && analysis.trend && analysis.momentum && analysis.risk && (
+          {verified && analysis.trend && analysis.momentum && (
             <>
               <section aria-label="Returns" className="grid grid-cols-2 border-y border-slate-200 sm:grid-cols-5">
                 {Object.entries(analysis.performancePct).map(([period, value]) => (
@@ -381,34 +571,263 @@ export default function AnalysisPage() {
                 </div>
               </section>
 
-              <section className="grid gap-5 border-y border-slate-200 py-5 md:grid-cols-2">
-                <div>
-                  <h3 className="font-semibold text-slate-900">Risk and range</h3>
-                  <dl className="mt-3 grid grid-cols-2 gap-x-5 gap-y-4 text-sm">
-                    <div><dt className="text-slate-500">Annualized volatility</dt><dd className="mt-1 font-semibold text-slate-900">{formatPercent(analysis.risk.annualizedVolatilityPct)}</dd></div>
-                    <div><dt className="text-slate-500">Maximum drawdown</dt><dd className="mt-1 font-semibold text-slate-900">{formatPercent(analysis.risk.maxDrawdownPct)}</dd></div>
-                    <div><dt className="text-slate-500">52-week high</dt><dd className="mt-1 font-semibold text-slate-900">{formatNumber(analysis.risk.high52Week)}</dd></div>
-                    <div><dt className="text-slate-500">52-week low</dt><dd className="mt-1 font-semibold text-slate-900">{formatNumber(analysis.risk.low52Week)}</dd></div>
-                    <div><dt className="text-slate-500">Average volume (20d)</dt><dd className="mt-1 font-semibold text-slate-900">{analysis.risk.averageVolume20?.toLocaleString() ?? 'Unavailable'}</dd></div>
-                    <div><dt className="text-slate-500">Volume vs 20d average</dt><dd className="mt-1 font-semibold text-slate-900">{formatPercent(analysis.risk.volumeVsAverage20Pct)}</dd></div>
-                  </dl>
-                </div>
-              </section>
             </>
+          )}
+
+          <section aria-labelledby="company-news-heading" className="border-y border-slate-200 py-5">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <h3 id="company-news-heading" className="font-semibold text-slate-900">Latest company news</h3>
+                <p className="mt-1 text-xs leading-relaxed text-slate-500">
+                  Tone is a text-based cue. The next-close move is observed context; other events may also affect price.
+                </p>
+              </div>
+              {companyNews?.items.length > 0 && (
+                <span className="text-xs text-slate-500">{companyNews.items.length} most recent stories · Past 30 days</span>
+              )}
+            </div>
+
+            {companyNews?.providers && (
+              <div className="mt-4 flex flex-wrap gap-2" aria-label="News provider status">
+                {companyNews.providers.map((provider) => {
+                  const statusLabel = {
+                    connected: provider.articleCount > 0 ? `${provider.articleCount} stories` : 'Connected',
+                    setup_required: provider.id === 'sec_edgar' ? 'Contact email needed' : 'API key needed',
+                    license_required: 'License required',
+                    unavailable: 'Temporarily unavailable',
+                  }[provider.status];
+                  const statusStyle = {
+                    connected: 'border-emerald-200 bg-emerald-50 text-emerald-800',
+                    setup_required: 'border-slate-200 bg-slate-50 text-slate-600',
+                    license_required: 'border-amber-200 bg-amber-50 text-amber-900',
+                    unavailable: 'border-rose-200 bg-rose-50 text-rose-800',
+                  }[provider.status];
+
+                  return (
+                    <span key={provider.id} className={`inline-flex items-center gap-1.5 rounded border px-2 py-1 text-[11px] ${statusStyle}`}>
+                      <span className="font-semibold">{provider.name}</span>
+                      <span>{statusLabel}</span>
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+
+            {isLoadingNews && <p role="status" className="py-6 text-sm text-slate-500">Loading company news...</p>}
+            {newsError && <p role="status" className="py-5 text-sm text-amber-800">News could not be loaded: {newsError}</p>}
+            {!isLoadingNews && !newsError && companyNews?.source === 'unavailable' && (
+              <p role="status" className="py-5 text-sm text-slate-600">No company stories were returned by the connected providers.</p>
+            )}
+            {!isLoadingNews && !newsError && companyNews?.source === 'aggregated' && companyNews.items.length === 0 && (
+              <p className="py-5 text-sm text-slate-600">No company news found in the past 30 days.</p>
+            )}
+            {companyNews?.source === 'aggregated' && companyNews.items.length > 0 && (
+              <ol className="mt-4 columns-1 gap-3 md:columns-2 xl:columns-3">
+                {companyNews.items.map((item) => {
+                  const priceReaction = verified ? getNewsPriceReaction(item, analysis.priceHistory) : null;
+                  const toneStyle = {
+                    POSITIVE: 'bg-emerald-100 text-emerald-900',
+                    NEGATIVE: 'bg-rose-100 text-rose-900',
+                    MIXED: 'bg-amber-100 text-amber-900',
+                    NEUTRAL: 'bg-slate-100 text-slate-700',
+                  }[item.tone];
+                  const toneLabel = {
+                    POSITIVE: 'Positive tone',
+                    NEGATIVE: 'Negative tone',
+                    MIXED: 'Mixed tone',
+                    NEUTRAL: 'Neutral tone',
+                  }[item.tone];
+
+                  return (
+                    <li key={item.id} className="mb-3 break-inside-avoid">
+                      <details className="group overflow-hidden rounded-md border border-slate-200 bg-white transition-colors open:border-slate-300">
+                        <summary className="flex cursor-pointer list-none items-start gap-3 p-3.5 marker:hidden hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-700 [&::-webkit-details-marker]:hidden sm:items-center sm:px-4">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
+                              {item.category === 'filing' && (
+                                <span className="inline-flex rounded bg-sky-100 px-2 py-0.5 text-[11px] font-semibold text-sky-900">SEC filing</span>
+                              )}
+                              <span className={`inline-flex rounded px-2 py-0.5 text-[11px] font-semibold ${toneStyle}`}>
+                                {toneLabel}
+                              </span>
+                              <span className="text-xs text-slate-500">
+                                {item.source}{item.provider !== item.source ? ` via ${item.provider}` : ''} · {new Date(item.datetime * 1000).toLocaleString()}
+                              </span>
+                            </div>
+                            <h4 className="mt-2 text-sm font-semibold leading-snug text-slate-900 sm:text-[15px]">
+                              {item.headline}
+                            </h4>
+                            {item.summary && (
+                              <p className="mt-2 line-clamp-3 text-sm leading-relaxed text-slate-600">{item.summary}</p>
+                            )}
+                            <p className={`mt-2 text-xs font-medium tabular-nums ${priceReaction ? priceReaction.changePct >= 0 ? 'text-emerald-700' : 'text-rose-700' : 'text-slate-500'}`}>
+                              {priceReaction
+                                ? `Next close ${priceReaction.date} · ${formatPercent(priceReaction.changePct)} vs prior close`
+                                : 'Next-close move unavailable'}
+                            </p>
+                          </div>
+                          <ChevronDown className="mt-1 h-4 w-4 shrink-0 text-slate-500 transition-transform group-open:rotate-180 sm:mt-0" aria-hidden="true" />
+                        </summary>
+
+                        <div className="space-y-4 border-t border-slate-200 bg-slate-50/70 px-4 py-4">
+                          {item.summary && (
+                            <p className="max-w-4xl text-sm leading-relaxed text-slate-700">{item.summary}</p>
+                          )}
+                          <div className="grid gap-4 sm:grid-cols-2">
+                            <div>
+                              <p className="text-[11px] font-semibold uppercase text-slate-500">Headline tone</p>
+                              <p className="mt-1 text-sm font-medium text-slate-800">{toneLabel}</p>
+                              {item.toneSignals.length > 0 && (
+                                <p className="mt-1 text-xs leading-relaxed text-slate-600">
+                                  Matched terms: {item.toneSignals.join(', ')}
+                                </p>
+                              )}
+                            </div>
+                            <div>
+                              <p className="text-[11px] font-semibold uppercase text-slate-500">Observed price context</p>
+                              <p className="mt-1 text-sm font-medium text-slate-800">
+                                {priceReaction
+                                  ? `${formatPercent(priceReaction.changePct)} close-to-close on ${priceReaction.date}`
+                                  : 'A verified next-close move is not available.'}
+                              </p>
+                              <p className="mt-1 text-xs leading-relaxed text-slate-500">
+                                This movement is not necessarily caused by this story.
+                              </p>
+                            </div>
+                          </div>
+                          {item.url && (
+                            <a href={item.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 text-sm font-semibold text-emerald-800 underline decoration-emerald-300 underline-offset-4 hover:text-emerald-950">
+                              Read at {item.source}
+                              <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+                            </a>
+                          )}
+                        </div>
+                      </details>
+                    </li>
+                  );
+                })}
+              </ol>
+            )}
+          </section>
+
+          {verified && analysis.risk && (
+            <section className="grid gap-5 border-y border-slate-200 py-5 md:grid-cols-2">
+              <div>
+                <h3 className="font-semibold text-slate-900">Risk and range</h3>
+                <dl className="mt-3 grid grid-cols-2 gap-x-5 gap-y-4 text-sm">
+                  <div><dt className="text-slate-500">Annualized volatility</dt><dd className="mt-1 font-semibold text-slate-900">{formatPercent(analysis.risk.annualizedVolatilityPct)}</dd></div>
+                  <div><dt className="text-slate-500">Maximum drawdown</dt><dd className="mt-1 font-semibold text-slate-900">{formatPercent(analysis.risk.maxDrawdownPct)}</dd></div>
+                  <div><dt className="text-slate-500">52-week high</dt><dd className="mt-1 font-semibold text-slate-900">{formatNumber(analysis.risk.high52Week)}</dd></div>
+                  <div><dt className="text-slate-500">52-week low</dt><dd className="mt-1 font-semibold text-slate-900">{formatNumber(analysis.risk.low52Week)}</dd></div>
+                  <div><dt className="text-slate-500">Average volume (20d)</dt><dd className="mt-1 font-semibold text-slate-900">{analysis.risk.averageVolume20?.toLocaleString() ?? 'Unavailable'}</dd></div>
+                  <div><dt className="text-slate-500">Volume vs 20d average</dt><dd className="mt-1 font-semibold text-slate-900">{formatPercent(analysis.risk.volumeVsAverage20Pct)}</dd></div>
+                </dl>
+              </div>
+            </section>
           )}
 
           {(analysis.company || analysis.financialKpis) && (
             <section className="border-y border-slate-200 py-5">
-              <h3 className="font-semibold text-slate-900">Company fundamentals</h3>
+              <h3 className="font-semibold text-slate-900">Quarterly company performance</h3>
               {analysis.company?.finnhubIndustry && <p className="mt-1 text-sm text-slate-600">{String(analysis.company.finnhubIndustry)}{analysis.company.country ? ` · ${String(analysis.company.country)}` : ''}</p>}
-              <p className="mt-2 text-xs text-slate-500">
-                Ratios use TTM or the latest reported quarter. Balance sheet: {analysis.financialKpiPeriods?.balanceSheet ?? 'unavailable'}; annual statements: {analysis.financialKpiPeriods?.annualStatements ?? 'unavailable'}.
+              <p className="mt-2 max-w-4xl text-xs leading-relaxed text-slate-500">
+                Profitability table values are reported amounts in USD. Flow values are standalone fiscal quarters; Q4 is derived from annual filings when available. Returns are not annualized, and balance-sheet ratios use quarter-end values. A dash means the provider did not report enough data for that quarter.
               </p>
-              {analysis.financialKpis ? FINANCIAL_KPI_GROUPS.map((group) => (
-                <section key={group.title} className="mt-5 border-t border-slate-200 pt-4">
-                  <h4 className="text-sm font-semibold text-slate-800">{group.title}</h4>
-                  <dl className="mt-3 grid grid-cols-2 gap-x-5 gap-y-4 text-sm sm:grid-cols-3 lg:grid-cols-4">
-                    {group.metrics.map((metric) => (
+              {quarterlyFinancialHistory.length > 0 ? (
+                <>
+                  <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
+                    {FINANCIAL_KPI_GROUPS[0].metrics.map((metric) => {
+                      const currentValue = latestQuarter?.kpis[metric.key];
+                      const previousValue = previousQuarter?.kpis[metric.key];
+                      const change = formatQuarterChange(currentValue, previousValue, metric.format);
+
+                      return (
+                        <article key={metric.key} className="rounded-md border border-slate-200 bg-white p-3.5">
+                          <h4 className="text-xs font-medium text-slate-500">{metric.label}</h4>
+                          <p className="mt-2 text-lg font-semibold tabular-nums text-slate-950">
+                            {formatKpi(currentValue, metric.format)}
+                          </p>
+                          <p className="mt-1 text-[11px] text-slate-500">{latestQuarter?.period ?? 'Latest quarter'}</p>
+                          <p className={`mt-2 text-xs font-semibold tabular-nums ${change.className}`}>{change.label}</p>
+                        </article>
+                      );
+                    })}
+                  </div>
+
+                  <div className="mt-6 flex flex-col gap-3 border-y border-slate-200 py-3 lg:flex-row lg:items-center lg:justify-between">
+                    <div className="flex gap-1 overflow-x-auto pb-1" role="group" aria-label="KPI category">
+                      {FINANCIAL_KPI_GROUPS.map((group) => (
+                        <button
+                          key={group.title}
+                          type="button"
+                          aria-pressed={selectedKpiGroup === group.title}
+                          onClick={() => setSelectedKpiGroup(group.title)}
+                          className={`shrink-0 rounded px-3 py-2 text-xs font-semibold transition-colors ${selectedKpiGroup === group.title ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+                        >
+                          {group.title}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="inline-flex self-start rounded-md border border-slate-300 p-0.5" role="group" aria-label="KPI quarter range">
+                      {(['4Q', '8Q', '12Q', 'ALL'] as const).map((range) => (
+                        <button
+                          key={range}
+                          type="button"
+                          aria-pressed={kpiRange === range}
+                          onClick={() => setKpiRange(range)}
+                          className={`min-w-12 rounded px-2.5 py-1.5 text-xs font-semibold transition-colors ${kpiRange === range ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+                        >
+                          {range === 'ALL' ? 'All' : range}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div id="quarterly-kpi-panel" role="region" aria-label={`${activeKpiGroup.title} by quarter`} className="mt-4">
+                    <div className="mb-2 flex items-center gap-2">
+                      <span className="h-4 w-1 rounded-full bg-emerald-700" aria-hidden="true" />
+                      <h4 className="text-sm font-semibold text-slate-900">{activeKpiGroup.title}</h4>
+                    </div>
+                    <div className="overflow-x-auto overscroll-x-contain rounded-md border border-slate-200 bg-white">
+                      <table className="w-full min-w-max border-separate border-spacing-0 text-sm">
+                        <thead>
+                          <tr className="bg-slate-50">
+                            <th scope="col" className="sticky left-0 z-20 min-w-48 border-b border-slate-200 bg-slate-50 px-3 py-2.5 text-left text-xs font-semibold uppercase text-slate-500">Metric</th>
+                            {visibleQuarterlyHistory.map((period) => (
+                              <th key={period.period} scope="col" className={`min-w-28 border-b border-slate-200 px-3 py-2.5 text-right ${period.quarter === 1 ? 'border-l-2 border-l-slate-300' : 'border-l border-l-slate-200'}`}>
+                                <span className="block font-semibold text-slate-900">Q{period.quarter}</span>
+                                <span className="mt-0.5 block text-[11px] font-medium text-slate-500">FY {period.fiscalYear}</span>
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {activeKpiGroup.metrics.map((metric, metricIndex) => (
+                            <tr key={metric.key} className={`group ${metricIndex % 2 === 0 ? 'bg-white' : 'bg-slate-50/70'} hover:bg-emerald-50/60`}>
+                              <th scope="row" className={`sticky left-0 z-10 border-t border-slate-100 px-3 py-2.5 text-left text-xs font-medium text-slate-700 group-hover:bg-emerald-50 ${metricIndex % 2 === 0 ? 'bg-white' : 'bg-slate-50'}`}>{metric.label}</th>
+                              {visibleQuarterlyHistory.map((period) => {
+                                const value = period.kpis[metric.key];
+                                return (
+                                  <td key={period.period} className={`border-l border-t border-slate-100 px-3 py-2.5 text-right font-medium tabular-nums text-slate-900 ${period.quarter === 1 ? 'border-l-2 border-l-slate-300' : ''}`}>
+                                    {value == null ? <span className="text-slate-400">—</span> : formatKpi(value, metric.format)}
+                                  </td>
+                                );
+                              })}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </>
+              ) : <p className="mt-3 text-sm text-slate-600">Quarterly statement history is not available from the current provider.</p>}
+
+              {analysis.financialKpis && (
+                <section className="mt-5 border-t border-slate-200 pt-4">
+                  <h4 className="text-sm font-semibold text-slate-800">Latest market snapshot</h4>
+                  <p className="mt-1 text-xs text-slate-500">These market-based metrics reflect the latest provider data, not historical quarters.</p>
+                  <dl className="mt-3 grid grid-cols-2 gap-x-5 gap-y-4 text-sm sm:grid-cols-3 lg:grid-cols-6">
+                    {CURRENT_MARKET_KPI_METRICS.map((metric) => (
                       <div key={metric.key}>
                         <dt className="text-slate-500">{metric.label}</dt>
                         <dd className="mt-1 font-semibold tabular-nums text-slate-900">
@@ -418,21 +837,21 @@ export default function AnalysisPage() {
                     ))}
                   </dl>
                 </section>
-              )) : <p className="mt-3 text-sm text-slate-600">Financial KPIs are not available from the current provider.</p>}
+              )}
             </section>
           )}
 
-          {analysis.profitabilityHistory.length > 0 && (
+          {quarterlyFinancialHistory.length > 0 && (
             <section className="border-y border-slate-200 py-5">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                 <div>
-                  <h3 className="font-semibold text-slate-900">Profitability over time</h3>
+                  <h3 className="font-semibold text-slate-900">Quarterly profitability and returns</h3>
                   <p className="mt-1 text-xs text-slate-500">
-                    Annual filing ratios. Returns use reported year-end balance sheet values; missing statement items are shown as gaps.
+                    Profit trends use actual USD amounts. Return ratios remain percentages and are not annualized.
                   </p>
                 </div>
                 <div className="inline-flex self-start rounded-md border border-slate-300 p-0.5" role="group" aria-label="Profitability chart range">
-                  {(['5Y', '10Y', 'ALL'] as const).map((range) => (
+                  {(['4Q', '8Q', '12Q', 'ALL'] as const).map((range) => (
                     <button
                       key={range}
                       type="button"
@@ -448,17 +867,27 @@ export default function AnalysisPage() {
 
               <div className="mt-5 grid gap-6 xl:grid-cols-2">
                 <div className="min-w-0">
-                  <h4 className="mb-2 text-sm font-medium text-slate-800">Margins</h4>
+                  <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <h4 className="text-sm font-medium text-slate-800">Profit amounts (USD)</h4>
+                    <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-600" aria-label="Profit chart legend">
+                      <span className="inline-flex items-center gap-1.5"><span className="h-2 w-3 rounded-sm bg-emerald-700" aria-hidden="true" />Gross profit</span>
+                      <span className="inline-flex items-center gap-1.5"><span className="h-2 w-3 rounded-sm bg-sky-700" aria-hidden="true" />Operating income</span>
+                      <span className="inline-flex items-center gap-1.5"><span className="h-2 w-3 rounded-sm bg-amber-600" aria-hidden="true" />Net income</span>
+                      <span className="inline-flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-green-700" aria-hidden="true" />Up</span>
+                      <span className="inline-flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-rose-700" aria-hidden="true" />Down</span>
+                      <span className="inline-flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-amber-600" aria-hidden="true" />Flat / unavailable</span>
+                    </div>
+                  </div>
                   <div className="h-[270px] w-full">
                     <ResponsiveContainer width="100%" height="100%">
-                      <LineChart data={visibleProfitabilityHistory} margin={{ top: 8, right: 12, bottom: 4, left: 4 }}>
+                      <LineChart data={visibleQuarterlyTrendHistory} margin={{ top: 8, right: 12, bottom: 4, left: 4 }}>
                         <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
                         <XAxis dataKey="period" tick={{ fontSize: 11 }} />
-                        <YAxis width={48} tickFormatter={(value: number) => `${value}%`} tick={{ fontSize: 11 }} />
-                        <Tooltip labelFormatter={(value) => `Fiscal year ${value}`} formatter={(value: number, name: string) => [`${formatNumber(value)}%`, name]} />
-                        <Line type="monotone" dataKey="grossProfitMargin" name="Gross margin" stroke="#047857" strokeWidth={2} dot={{ r: 2 }} connectNulls={false} />
-                        <Line type="monotone" dataKey="operatingProfitMargin" name="Operating margin" stroke="#0369a1" strokeWidth={2} dot={{ r: 2 }} connectNulls={false} />
-                        <Line type="monotone" dataKey="netProfitMargin" name="Net margin" stroke="#d97706" strokeWidth={2} dot={{ r: 2 }} connectNulls={false} />
+                        <YAxis width={76} tickFormatter={(value: number) => formatKpi(value, 'currency')} tick={{ fontSize: 11 }} />
+                        <Tooltip labelFormatter={(value) => `${value}`} formatter={(value: number, name: string) => [formatKpi(value, 'currency'), name]} />
+                        <Line type="monotone" dataKey="grossProfit" name="Gross profit" stroke="#047857" strokeWidth={2} dot={<ProfitChangeDot profitKey="grossProfit" history={profitChartHistory} />} connectNulls={false} />
+                        <Line type="monotone" dataKey="operatingIncome" name="Operating income" stroke="#0369a1" strokeWidth={2} dot={<ProfitChangeDot profitKey="operatingIncome" history={profitChartHistory} />} connectNulls={false} />
+                        <Line type="monotone" dataKey="netIncome" name="Net income" stroke="#d97706" strokeWidth={2} dot={<ProfitChangeDot profitKey="netIncome" history={profitChartHistory} />} connectNulls={false} />
                       </LineChart>
                     </ResponsiveContainer>
                   </div>
@@ -471,7 +900,7 @@ export default function AnalysisPage() {
                         <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
                         <XAxis dataKey="period" tick={{ fontSize: 11 }} />
                         <YAxis width={48} tickFormatter={(value: number) => `${value}%`} tick={{ fontSize: 11 }} />
-                        <Tooltip labelFormatter={(value) => `Fiscal year ${value}`} formatter={(value: number, name: string) => [`${formatNumber(value)}%`, name]} />
+                        <Tooltip labelFormatter={(value) => `${value}`} formatter={(value: number, name: string) => [`${formatNumber(value)}%`, name]} />
                         <Line type="monotone" dataKey="returnOnEquity" name="ROE" stroke="#be123c" strokeWidth={2} dot={{ r: 2 }} connectNulls={false} />
                         <Line type="monotone" dataKey="returnOnAssets" name="ROA" stroke="#7c3aed" strokeWidth={2} dot={{ r: 2 }} connectNulls={false} />
                         <Line type="monotone" dataKey="returnOnCapitalEmployed" name="ROCE" stroke="#475569" strokeWidth={2} dot={{ r: 2 }} connectNulls={false} />

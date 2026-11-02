@@ -2,6 +2,20 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  color-scheme: light;
+  --surface-canvas: #f5f8f6;
+  --surface-panel: #ffffff;
+  --surface-muted: #ebf1ed;
+  --ink-primary: #17261d;
+  --ink-secondary: #4d6053;
+  --border-subtle: #d8e3dc;
+  --accent-primary: #155f3c;
+  --accent-soft: #eef7f1;
+  --signal-positive: #197849;
+  --signal-negative: #bd4c49;
+}
+
 * {
   @apply box-border;
 }
@@ -11,40 +25,50 @@ html {
 }
 
 body {
-  @apply bg-slate-50 text-slate-900 antialiased;
+  @apply min-h-screen bg-slate-50 text-slate-900 antialiased;
+  font-variant-numeric: tabular-nums;
 }
 
-/* Custom utility classes */
+::selection {
+  background: #dcefe2;
+  color: #103d2a;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+
 .card {
-  @apply rounded-lg border border-slate-200 bg-white shadow-sm;
+  @apply rounded-md border border-slate-200 bg-white shadow-sm;
 }
 
 .card-header {
-  @apply border-b border-slate-200 px-6 py-4;
+  @apply border-b border-slate-200 px-5 py-4;
 }
 
 .card-body {
-  @apply px-6 py-4;
+  @apply px-5 py-4;
 }
 
 .btn-primary {
-  @apply inline-flex items-center justify-center rounded-lg bg-green-600 px-4 py-2 font-medium text-white transition-colors hover:bg-green-700 disabled:opacity-50;
+  @apply inline-flex items-center justify-center rounded-md bg-green-700 px-4 py-2 font-medium text-white transition-colors hover:bg-green-800 disabled:cursor-not-allowed disabled:opacity-50;
 }
 
 .btn-secondary {
-  @apply inline-flex items-center justify-center rounded-lg bg-slate-200 px-4 py-2 font-medium text-slate-900 transition-colors hover:bg-slate-300;
+  @apply inline-flex items-center justify-center rounded-md border border-slate-300 bg-white px-4 py-2 font-medium text-slate-800 transition-colors hover:bg-slate-50;
 }
 
 .btn-danger {
-  @apply inline-flex items-center justify-center rounded-lg bg-red-600 px-4 py-2 font-medium text-white transition-colors hover:bg-red-700;
+  @apply inline-flex items-center justify-center rounded-md bg-red-700 px-4 py-2 font-medium text-white transition-colors hover:bg-red-800;
 }
 
 .input-field {
-  @apply w-full rounded-lg border border-slate-300 px-3 py-2 text-sm transition-colors focus:border-green-500 focus:outline-none focus:ring-2 focus:ring-green-100;
+  @apply w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 transition-colors placeholder:text-slate-400 focus:border-green-700 focus:outline-none focus:ring-2 focus:ring-green-100;
 }
 
 .badge {
-  @apply inline-block rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700;
+  @apply inline-block rounded border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-700;
 }
 
 .badge-success {

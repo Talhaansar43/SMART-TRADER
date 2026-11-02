@@ -8,10 +8,12 @@ Related Files: app/api/routes/market.py, app/config.py
 import logging
 import json
 import math
+import re
+import time
 import redis
 import requests
 from typing import Optional, Dict, List, Any
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from app.config import settings
 import truststore
 
@@ -43,6 +45,340 @@ except Exception as e:
     REDIS_AVAILABLE = False
 
 CACHE_TIMEOUT = 300  # 5 minutes
+SEC_TICKER_MAP: Dict[str, Dict[str, Any]] = {}
+SEC_TICKER_MAP_LOADED_AT = 0.0
+
+POSITIVE_NEWS_TERMS = (
+    "beat estimates", "beats estimates", "beat forecast", "beats forecast",
+    "record revenue", "raises guidance", "raised guidance", "upgrade", "upgraded",
+    "approval", "approved", "surge", "strong demand", "buyback",
+    "dividend increase", "shares rise", "stock rises", "shares gain", "stock gains",
+)
+NEGATIVE_NEWS_TERMS = (
+    "miss estimates", "misses estimates", "cuts guidance", "lowered guidance",
+    "cut guidance", "misses forecast", "downgrade", "downgraded", "investigation",
+    "lawsuit", "recall", "layoffs", "loss widens", "weak demand", "fined",
+    "outage", "breach", "raises concerns", "supply constraints", "shares fall",
+    "stock falls", "shares tumble", "stock tumbles",
+)
+
+
+def _classify_news_tone(headline: str, summary: str) -> tuple[str, List[str]]:
+    text = f"{headline} {summary}".lower()
+    positive_matches = [term for term in POSITIVE_NEWS_TERMS if term in text]
+    negative_matches = [term for term in NEGATIVE_NEWS_TERMS if term in text]
+    signals = positive_matches + negative_matches
+
+    if positive_matches and negative_matches:
+        return "MIXED", signals
+    if positive_matches:
+        return "POSITIVE", signals
+    if negative_matches:
+        return "NEGATIVE", signals
+    return "NEUTRAL", signals
+
+
+def _parse_news_timestamp(value: Any) -> Optional[int]:
+    if isinstance(value, (int, float)) and math.isfinite(value) and value > 0:
+        return int(value / 1000) if value > 1_000_000_000_000 else int(value)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return int(parsed.timestamp())
+        except ValueError:
+            try:
+                parsed_date = date.fromisoformat(value)
+                return int(datetime.combine(parsed_date, datetime.min.time(), timezone.utc).timestamp())
+            except ValueError:
+                return None
+    return None
+
+
+def _build_news_item(
+    *,
+    symbol: str,
+    provider: str,
+    item_id: Any,
+    headline: Any,
+    summary: Any,
+    publisher: Any,
+    url: Any,
+    published: Any,
+    category: str = "news",
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(headline, str) or not headline.strip():
+        return None
+    timestamp = _parse_news_timestamp(published)
+    if timestamp is None:
+        return None
+    normalized_url = url if isinstance(url, str) and url.startswith(("https://", "http://")) else None
+    headline = headline.strip()
+    summary_text = summary.strip() if isinstance(summary, str) else ""
+    tone, signals = _classify_news_tone(headline, summary_text)
+    if category == "filing":
+        tone, signals = "NEUTRAL", []
+    return {
+        "id": str(item_id or f"{provider}-{symbol}-{timestamp}-{headline[:24]}"),
+        "headline": headline,
+        "summary": summary_text,
+        "source": str(publisher or provider),
+        "provider": provider,
+        "category": category,
+        "url": normalized_url,
+        "datetime": timestamp,
+        "tone": tone,
+        "toneSignals": signals,
+    }
+
+
+def _sec_company_tickers(user_agent: str) -> Dict[str, Dict[str, Any]]:
+    global SEC_TICKER_MAP, SEC_TICKER_MAP_LOADED_AT
+    if SEC_TICKER_MAP and time.monotonic() - SEC_TICKER_MAP_LOADED_AT < 86400:
+        return SEC_TICKER_MAP
+
+    response = requests.get(
+        "https://www.sec.gov/files/company_tickers.json",
+        headers={"User-Agent": user_agent, "Accept": "application/json"},
+        timeout=8,
+    )
+    response.raise_for_status()
+    data = response.json()
+    if not isinstance(data, dict):
+        raise ValueError("SEC ticker map response was not an object")
+    SEC_TICKER_MAP = {
+        str(record.get("ticker", "")).upper(): record
+        for record in data.values()
+        if isinstance(record, dict) and record.get("ticker")
+    }
+    SEC_TICKER_MAP_LOADED_AT = time.monotonic()
+    return SEC_TICKER_MAP
+
+
+def get_company_news(symbol: str, limit: int = 10) -> Dict[str, Any]:
+    """Aggregate recent company news and filings from configured providers."""
+    cache_key = f"company_news:v2:{symbol}:{limit}"
+    if REDIS_AVAILABLE and redis_client:
+        try:
+            cached_data = redis_client.get(cache_key)
+            if cached_data:
+                result = json.loads(cached_data)
+                if isinstance(result, dict):
+                    result["cached"] = True
+                    return result
+        except Exception as e:
+            logger.warning(f"News cache read error for {symbol}: {str(e)}")
+
+    end_date = date.today()
+    start_date = end_date - timedelta(days=30)
+    items: List[Dict[str, Any]] = []
+    providers = [
+        {"id": "finnhub", "name": "Finnhub", "status": "setup_required" if not settings.FINNHUB_API_KEY else "connected", "articleCount": 0},
+        {"id": "benzinga", "name": "Benzinga", "status": "setup_required" if not settings.BENZINGA_API_KEY else "connected", "articleCount": 0},
+        {"id": "massive", "name": "Massive", "status": "setup_required" if not settings.MASSIVE_API_KEY else "connected", "articleCount": 0},
+        {"id": "sec_edgar", "name": "SEC EDGAR", "status": "setup_required" if not settings.SEC_CONTACT_EMAIL else "connected", "articleCount": 0},
+        {"id": "reuters", "name": "Reuters / LSEG", "status": "license_required", "articleCount": 0},
+        {"id": "dow_jones", "name": "Dow Jones", "status": "license_required", "articleCount": 0},
+    ]
+    provider_by_id = {provider["id"]: provider for provider in providers}
+
+    if settings.FINNHUB_API_KEY and FINNHUB_AVAILABLE and finnhub_client:
+        try:
+            profile = finnhub_client.company_profile2(symbol=symbol)
+            profile_name = profile.get("name", "") if isinstance(profile, dict) else ""
+            name_tokens = re.findall(r"[A-Za-z0-9]+", profile_name)
+            company_name = next((token for token in name_tokens if token.lower() != "the"), "")
+            aliases = [symbol, company_name] if len(company_name) > 2 else [symbol]
+            provider_items = finnhub_client.company_news(
+                symbol,
+                _from=start_date.isoformat(),
+                to=end_date.isoformat(),
+            )
+            for item in provider_items or []:
+                if not isinstance(item, dict):
+                    continue
+                headline = str(item.get("headline") or "")
+                if not any(
+                    re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", headline, re.IGNORECASE)
+                    for alias in aliases
+                ):
+                    continue
+                news_item = _build_news_item(
+                    symbol=symbol,
+                    provider="Finnhub",
+                    item_id=item.get("id"),
+                    headline=headline,
+                    summary=item.get("summary"),
+                    publisher=item.get("source"),
+                    url=item.get("url"),
+                    published=item.get("datetime"),
+                )
+                if news_item:
+                    items.append(news_item)
+            provider_by_id["finnhub"]["articleCount"] = sum(item["provider"] == "Finnhub" for item in items)
+        except Exception as error:
+            provider_by_id["finnhub"]["status"] = "unavailable"
+            logger.warning("Finnhub news unavailable for %s: %s", symbol, error)
+
+    if settings.BENZINGA_API_KEY:
+        try:
+            response = requests.get(
+                "https://api.benzinga.com/api/v2/news",
+                params={
+                    "token": settings.BENZINGA_API_KEY,
+                    "tickers": symbol,
+                    "pageSize": limit,
+                    "displayOutput": "full",
+                    "accept": "json",
+                },
+                timeout=8,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            provider_items = payload if isinstance(payload, list) else next(
+                (payload.get(key) for key in ("data", "results", "news", "items") if isinstance(payload.get(key), list)),
+                [],
+            ) if isinstance(payload, dict) else []
+            for item in provider_items:
+                if not isinstance(item, dict):
+                    continue
+                news_item = _build_news_item(
+                    symbol=symbol,
+                    provider="Benzinga",
+                    item_id=item.get("id"),
+                    headline=item.get("title") or item.get("headline"),
+                    summary=item.get("teaser") or item.get("summary"),
+                    publisher=item.get("source") or "Benzinga",
+                    url=item.get("url"),
+                    published=item.get("created") or item.get("published"),
+                )
+                if news_item:
+                    items.append(news_item)
+            provider_by_id["benzinga"]["articleCount"] = sum(item["provider"] == "Benzinga" for item in items)
+        except Exception as error:
+            provider_by_id["benzinga"]["status"] = "unavailable"
+            logger.warning("Benzinga news unavailable for %s (%s)", symbol, type(error).__name__)
+
+    if settings.MASSIVE_API_KEY:
+        try:
+            response = requests.get(
+                "https://api.massive.com/v2/reference/news",
+                params={
+                    "ticker": symbol,
+                    "limit": limit,
+                    "sort": "published_utc",
+                    "order": "desc",
+                    "apiKey": settings.MASSIVE_API_KEY,
+                },
+                timeout=8,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            provider_items = payload.get("results", []) if isinstance(payload, dict) else []
+            for item in provider_items:
+                if not isinstance(item, dict):
+                    continue
+                tickers = item.get("tickers")
+                if isinstance(tickers, list) and symbol not in [str(ticker).upper() for ticker in tickers]:
+                    continue
+                publisher = item.get("publisher")
+                publisher_name = publisher.get("name") if isinstance(publisher, dict) else None
+                news_item = _build_news_item(
+                    symbol=symbol,
+                    provider="Massive",
+                    item_id=item.get("id"),
+                    headline=item.get("title"),
+                    summary=item.get("description"),
+                    publisher=publisher_name or "Massive",
+                    url=item.get("article_url"),
+                    published=item.get("published_utc"),
+                )
+                if news_item:
+                    items.append(news_item)
+            provider_by_id["massive"]["articleCount"] = sum(item["provider"] == "Massive" for item in items)
+        except Exception as error:
+            provider_by_id["massive"]["status"] = "unavailable"
+            logger.warning("Massive news unavailable for %s (%s)", symbol, type(error).__name__)
+
+    if settings.SEC_CONTACT_EMAIL:
+        sec_user_agent = f"{settings.APP_NAME} {settings.SEC_CONTACT_EMAIL}"
+        try:
+            ticker_record = _sec_company_tickers(sec_user_agent).get(symbol)
+            if ticker_record:
+                cik = int(ticker_record["cik_str"])
+                submissions_response = requests.get(
+                    f"https://data.sec.gov/submissions/CIK{cik:010d}.json",
+                    headers={"User-Agent": sec_user_agent, "Accept": "application/json"},
+                    timeout=8,
+                )
+                submissions_response.raise_for_status()
+                submissions = submissions_response.json()
+                recent = submissions.get("filings", {}).get("recent", {})
+                forms = recent.get("form", [])
+                filing_dates = recent.get("filingDate", [])
+                accessions = recent.get("accessionNumber", [])
+                documents = recent.get("primaryDocument", [])
+                descriptions = recent.get("primaryDocDescription", [])
+                company_name = str(submissions.get("name") or ticker_record.get("title") or symbol)
+                for index, form in enumerate(forms):
+                    if form not in {"8-K", "10-Q", "10-K", "6-K", "20-F"}:
+                        continue
+                    filed_date = filing_dates[index] if index < len(filing_dates) else ""
+                    if filed_date < start_date.isoformat():
+                        continue
+                    accession = accessions[index] if index < len(accessions) else ""
+                    document = documents[index] if index < len(documents) else ""
+                    description = descriptions[index] if index < len(descriptions) else ""
+                    accession_path = str(accession).replace("-", "")
+                    filing_url = (
+                        f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_path}/{document}"
+                        if accession and document
+                        else f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_path}/"
+                    )
+                    news_item = _build_news_item(
+                        symbol=symbol,
+                        provider="SEC EDGAR",
+                        item_id=f"sec-{cik}-{accession}",
+                        headline=f"{form} filing{': ' + description if description else ''}",
+                        summary=f"{company_name} filed {form} with the SEC on {filed_date}.",
+                        publisher="SEC EDGAR",
+                        url=filing_url,
+                        published=filed_date,
+                        category="filing",
+                    )
+                    if news_item:
+                        items.append(news_item)
+                        provider_by_id["sec_edgar"]["articleCount"] += 1
+                        if provider_by_id["sec_edgar"]["articleCount"] >= limit:
+                            break
+        except Exception as error:
+            provider_by_id["sec_edgar"]["status"] = "unavailable"
+            logger.warning("SEC filings unavailable for %s: %s", symbol, error)
+
+    deduplicated_items = []
+    seen_headlines = set()
+    for item in items:
+        headline_key = re.sub(r"[^a-z0-9]+", " ", item["headline"].lower()).strip()
+        if headline_key in seen_headlines:
+            continue
+        seen_headlines.add(headline_key)
+        deduplicated_items.append(item)
+    deduplicated_items.sort(key=lambda news_item: news_item["datetime"], reverse=True)
+
+    result = {
+        "symbol": symbol,
+        "items": deduplicated_items[:limit],
+        "providers": providers,
+        "source": "aggregated" if deduplicated_items else "unavailable",
+        "cached": False,
+    }
+    if REDIS_AVAILABLE and redis_client:
+        try:
+            redis_client.setex(cache_key, CACHE_TIMEOUT, json.dumps(result))
+        except Exception as error:
+            logger.warning("News cache write error for %s: %s", symbol, error)
+    return result
 
 # Mock data for fallback
 MOCK_STOCKS = {
@@ -430,7 +766,12 @@ def get_stock_fundamentals(symbol: str) -> Dict[str, Any]:
         "source": "finnhub" if FINNHUB_AVAILABLE else None,
         "profile": None,
         "metrics": None,
-        "statements": {"latestBalanceSheet": None, "latestAnnual": None, "annualHistory": []},
+        "statements": {
+            "latestBalanceSheet": None,
+            "latestAnnual": None,
+            "quarterlyHistory": [],
+            "annualHistory": [],
+        },
     }
     if not FINNHUB_AVAILABLE or not finnhub_client:
         return result
@@ -465,6 +806,27 @@ def get_stock_fundamentals(symbol: str) -> Dict[str, Any]:
     try:
         quarterly = finnhub_client.financials_reported(symbol=symbol, freq="quarterly")
         quarterly_reports = quarterly.get("data", []) if isinstance(quarterly, dict) else []
+        quarterly_history = [
+            {
+                "year": item.get("year"),
+                "quarter": item.get("quarter"),
+                "asOf": item.get("endDate"),
+                "balanceSheet": statement_rows(item["report"], "bs"),
+                "incomeStatement": statement_rows(item["report"], "ic"),
+                "cashFlow": statement_rows(item["report"], "cf"),
+            }
+            for item in quarterly_reports
+            if isinstance(item, dict)
+            and isinstance(item.get("report"), dict)
+            and item.get("year") is not None
+            and item.get("quarter") in (1, 2, 3, 4)
+            and item.get("endDate")
+            and any(item["report"].get(key) for key in ("bs", "ic", "cf"))
+        ]
+        result["statements"]["quarterlyHistory"] = sorted(
+            quarterly_history,
+            key=lambda item: str(item.get("asOf") or ""),
+        )[-20:]
         balance_sheet_reports = [
             item for item in quarterly_reports
             if isinstance(item, dict)
@@ -499,9 +861,11 @@ def get_stock_fundamentals(symbol: str) -> Dict[str, Any]:
             }
             result["statements"]["annualHistory"] = [
                 {
+                    "year": item.get("year"),
                     "asOf": item.get("endDate"),
                     "balanceSheet": statement_rows(item["report"], "bs"),
                     "incomeStatement": statement_rows(item["report"], "ic"),
+                    "cashFlow": statement_rows(item["report"], "cf"),
                 }
                 for item in sorted(complete_reports, key=lambda report: str(report.get("endDate") or ""))
                 if item.get("endDate")

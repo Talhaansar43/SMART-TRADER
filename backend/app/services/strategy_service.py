@@ -221,6 +221,272 @@ def build_profitability_history(statements: dict[str, Any] | None) -> list[dict[
     return history
 
 
+def build_quarterly_financial_history(
+    statements: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Calculate comparable quarterly KPIs from reported statements."""
+    statements = statements if isinstance(statements, dict) else {}
+    quarterly_reports = statements.get("quarterlyHistory")
+    annual_reports = statements.get("annualHistory")
+    if not isinstance(quarterly_reports, list):
+        quarterly_reports = []
+    if not isinstance(annual_reports, list):
+        annual_reports = []
+
+    def normalized_label(value: Any) -> str:
+        return "".join(character for character in str(value).casefold() if character.isalnum())
+
+    def statement_value(rows: Any, *labels: str) -> float | None:
+        if not isinstance(rows, list):
+            return None
+        targets = {normalized_label(label) for label in labels}
+        for row in rows:
+            if not isinstance(row, dict) or normalized_label(row.get("label")) not in targets:
+                continue
+            value = row.get("value")
+            if isinstance(value, (int, float)) and math.isfinite(value):
+                return float(value)
+        return None
+
+    def statement_sum(rows: Any, *labels: str) -> float | None:
+        if not isinstance(rows, list):
+            return None
+        targets = {normalized_label(label) for label in labels}
+        values = [
+            float(row["value"])
+            for row in rows
+            if isinstance(row, dict)
+            and normalized_label(row.get("label")) in targets
+            and isinstance(row.get("value"), (int, float))
+            and math.isfinite(row["value"])
+        ]
+        return sum(values) if values else None
+
+    def fiscal_key(report: dict[str, Any]) -> tuple[int, int] | None:
+        try:
+            year = int(report.get("year"))
+            quarter = int(report.get("quarter"))
+        except (TypeError, ValueError):
+            return None
+        return (year, quarter) if quarter in (1, 2, 3, 4) else None
+
+    report_by_period: dict[tuple[int, int], dict[str, Any]] = {}
+    for report in quarterly_reports:
+        if isinstance(report, dict):
+            key = fiscal_key(report)
+            if key and report.get("asOf"):
+                report_by_period[key] = report
+
+    raw_quarterly_reports = dict(report_by_period)
+    for (fiscal_year, quarter), report in raw_quarterly_reports.items():
+        if quarter not in (2, 3, 4):
+            continue
+        previous_report = raw_quarterly_reports.get((fiscal_year, quarter - 1))
+        if not previous_report:
+            continue
+        normalized_report = dict(report)
+        for statement_key in ("incomeStatement", "cashFlow"):
+            previous_rows = previous_report.get(statement_key)
+            previous_values = {
+                normalized_label(row.get("label")): row.get("value")
+                for row in previous_rows
+                if isinstance(row, dict)
+                and isinstance(row.get("label"), str)
+                and isinstance(row.get("value"), (int, float))
+                and math.isfinite(row["value"])
+            } if isinstance(previous_rows, list) else {}
+            current_rows = report.get(statement_key)
+            standalone_rows = []
+            if isinstance(current_rows, list):
+                for row in current_rows:
+                    if not isinstance(row, dict) or not isinstance(row.get("label"), str):
+                        continue
+                    current_value = row.get("value")
+                    previous_value = previous_values.get(normalized_label(row["label"]))
+                    if (
+                        isinstance(current_value, (int, float))
+                        and math.isfinite(current_value)
+                        and isinstance(previous_value, (int, float))
+                        and math.isfinite(previous_value)
+                    ):
+                        standalone_rows.append({
+                            "label": row["label"],
+                            "value": float(current_value) - float(previous_value),
+                        })
+            normalized_report[statement_key] = standalone_rows
+        report_by_period[(fiscal_year, quarter)] = normalized_report
+
+    for annual_report in annual_reports:
+        if not isinstance(annual_report, dict):
+            continue
+        try:
+            fiscal_year = int(annual_report.get("year") or str(annual_report.get("asOf") or "")[:4])
+        except (TypeError, ValueError):
+            continue
+        if (fiscal_year, 4) in report_by_period:
+            continue
+        preceding_quarters = [report_by_period.get((fiscal_year, quarter)) for quarter in (1, 2, 3)]
+        if any(report is None for report in preceding_quarters):
+            continue
+
+        annual_income = annual_report.get("incomeStatement")
+        annual_cash_flow = annual_report.get("cashFlow")
+
+        def derive_fourth_quarter(annual_rows: Any, statement_key: str) -> list[dict[str, Any]]:
+            if not isinstance(annual_rows, list):
+                return []
+            derived_rows = []
+            for annual_row in annual_rows:
+                if not isinstance(annual_row, dict) or not isinstance(annual_row.get("label"), str):
+                    continue
+                annual_value = annual_row.get("value")
+                if not isinstance(annual_value, (int, float)) or not math.isfinite(annual_value):
+                    continue
+                quarter_values = [
+                    statement_value(report.get(statement_key), annual_row["label"])
+                    for report in preceding_quarters
+                ]
+                if all(value is not None for value in quarter_values):
+                    derived_rows.append({
+                        "label": annual_row["label"],
+                        "value": float(annual_value) - sum(value for value in quarter_values if value is not None),
+                    })
+            return derived_rows
+
+        annual_as_of = str(annual_report.get("asOf") or "")[:10]
+        if not annual_as_of:
+            continue
+        report_by_period[(fiscal_year, 4)] = {
+            "year": fiscal_year,
+            "quarter": 4,
+            "asOf": annual_as_of,
+            "balanceSheet": annual_report.get("balanceSheet"),
+            "incomeStatement": derive_fourth_quarter(annual_income, "incomeStatement"),
+            "cashFlow": derive_fourth_quarter(annual_cash_flow, "cashFlow"),
+        }
+
+    ordered_reports = sorted(
+        report_by_period.items(),
+        key=lambda entry: (str(entry[1].get("asOf") or ""), entry[0]),
+    )
+    history = []
+    revenue_by_period: dict[tuple[int, int], float] = {}
+    for (fiscal_year, quarter), report in ordered_reports:
+        income = report.get("incomeStatement")
+        balance = report.get("balanceSheet")
+        cash_flow = report.get("cashFlow")
+        revenue = statement_value(
+            income,
+            "Net sales",
+            "Revenue",
+            "Total revenue",
+            "Revenue from contract with customer excluding assessed tax",
+        )
+        gross_profit = statement_value(income, "Gross margin", "Gross profit")
+        cost_of_sales = statement_value(income, "Cost of sales", "Cost of revenue")
+        if gross_profit is None and revenue is not None and cost_of_sales is not None:
+            gross_profit = revenue - cost_of_sales
+        operating_income = statement_value(income, "Operating income", "Income from operations")
+        net_income = statement_value(income, "Net income", "Net income loss")
+        equity = statement_value(
+            balance,
+            "Total shareholders’ equity",
+            "Total shareholders' equity",
+            "Total stockholders’ equity",
+            "Total stockholders' equity",
+        )
+        assets = statement_value(balance, "Total assets")
+        current_assets = statement_value(balance, "Total current assets")
+        current_liabilities = statement_value(balance, "Total current liabilities")
+        inventory = statement_value(balance, "Inventories", "Inventory")
+        depreciation_amortization = statement_value(cash_flow, "Depreciation and amortization")
+        operating_cash_flow = statement_value(
+            cash_flow,
+            "Cash generated by operating activities",
+            "Net cash provided by operating activities",
+        )
+        capital_expenditure = statement_value(
+            cash_flow,
+            "Payments for acquisition of property, plant and equipment",
+            "Capital expenditures",
+        )
+        debt = statement_sum(balance, "Term debt", "Commercial paper")
+        cash = statement_sum(balance, "Cash and cash equivalents", "Marketable securities")
+        diluted_eps = statement_value(
+            income,
+            "Diluted (in dollars per share)",
+            "Diluted earnings per share",
+            "Earnings per share diluted",
+        )
+        if diluted_eps is None:
+            diluted_eps = statement_value(income, "Basic (in dollars per share)", "Basic earnings per share")
+
+        period_key = (fiscal_year, quarter)
+        if revenue is not None:
+            revenue_by_period[period_key] = revenue
+        previous_year_revenue = revenue_by_period.get((fiscal_year - 1, quarter))
+        previous_reports = [entry[1] for entry in ordered_reports if entry[0] < period_key]
+        previous_balance = previous_reports[-1].get("balanceSheet") if previous_reports else None
+        previous_assets = statement_value(previous_balance, "Total assets")
+        previous_inventory = statement_value(previous_balance, "Inventories", "Inventory")
+        average_assets = (assets + previous_assets) / 2 if assets is not None and previous_assets is not None else None
+        average_inventory = (inventory + previous_inventory) / 2 if inventory is not None and previous_inventory is not None else None
+
+        def percentage(numerator: float | None, denominator: float | None) -> float | None:
+            if numerator is None or denominator in (None, 0):
+                return None
+            return round(numerator / denominator * 100, 2)
+
+        history.append({
+            "fiscalYear": fiscal_year,
+            "quarter": quarter,
+            "period": f"FY{fiscal_year} Q{quarter}",
+            "asOf": str(report.get("asOf") or "")[:10],
+            "kpis": {
+                "revenue": round(revenue, 2) if revenue is not None else None,
+                "grossProfit": round(gross_profit, 2) if gross_profit is not None else None,
+                "operatingIncome": round(operating_income, 2) if operating_income is not None else None,
+                "netIncome": round(net_income, 2) if net_income is not None else None,
+                "grossProfitMargin": percentage(gross_profit, revenue),
+                "operatingProfitMargin": percentage(operating_income, revenue),
+                "netProfitMargin": percentage(net_income, revenue),
+                "returnOnEquity": percentage(net_income, equity),
+                "returnOnAssets": percentage(net_income, assets),
+                "returnOnCapitalEmployed": percentage(
+                    operating_income,
+                    assets - current_liabilities if assets is not None and current_liabilities is not None else None,
+                ),
+                "priceToEarnings": None,
+                "earningsPerShare": round(diluted_eps, 2) if diluted_eps is not None else None,
+                "priceToSales": None,
+                "priceToBook": None,
+                "ebitda": round(operating_income + depreciation_amortization, 2)
+                if operating_income is not None and depreciation_amortization is not None else None,
+                "enterpriseValueToEbitda": None,
+                "debtToEquity": round(debt / equity, 2) if debt is not None and equity not in (None, 0) else None,
+                "currentRatio": round(current_assets / current_liabilities, 2)
+                if current_assets is not None and current_liabilities not in (None, 0) else None,
+                "quickRatio": round((current_assets - inventory) / current_liabilities, 2)
+                if current_assets is not None and inventory is not None and current_liabilities not in (None, 0) else None,
+                "netDebt": round(debt - cash, 2) if debt is not None and cash is not None else None,
+                "freeCashFlow": round(operating_cash_flow - capital_expenditure, 2)
+                if operating_cash_flow is not None and capital_expenditure is not None else None,
+                "operatingCashFlow": operating_cash_flow,
+                "revenueGrowthRate": percentage(
+                    revenue - previous_year_revenue if revenue is not None and previous_year_revenue is not None else None,
+                    previous_year_revenue,
+                ),
+                "inventoryTurnover": round(cost_of_sales / average_inventory, 2)
+                if cost_of_sales is not None and average_inventory not in (None, 0) else None,
+                "assetTurnover": round(revenue / average_assets, 2)
+                if revenue is not None and average_assets not in (None, 0) else None,
+                "beta": None,
+                "dividendYield": None,
+            },
+        })
+    return history[-20:]
+
+
 def evaluate_sma_crossover(symbol: str, history: dict[str, Any]) -> dict[str, Any]:
     """Evaluate a long-only moving-average baseline; this function never places orders."""
     bars = history.get("data")
@@ -306,6 +572,7 @@ def analyze_stock_history(
         quote,
     )
     profitability_history = build_profitability_history(fundamentals.get("statements"))
+    quarterly_financial_history = build_quarterly_financial_history(fundamentals.get("statements"))
     result: dict[str, Any] = {
         "symbol": symbol,
         "status": "NOT_EVALUATED",
@@ -321,6 +588,7 @@ def analyze_stock_history(
         "financialKpis": financial_kpis,
         "financialKpiPeriods": financial_kpi_periods,
         "profitabilityHistory": profitability_history,
+        "quarterlyFinancialHistory": quarterly_financial_history,
     }
 
     if history.get("source") not in VERIFIED_HISTORY_SOURCES or history.get("mock") is not False:

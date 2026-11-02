@@ -8,7 +8,12 @@ Related Files: app/services/analysis_service.py
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.services.market_service import get_stock_fundamentals, get_stock_history, get_stock_price
+from app.services.market_service import (
+    get_company_news,
+    get_stock_fundamentals,
+    get_stock_history,
+    get_stock_price,
+)
 from app.services.strategy_service import analyze_stock_history, evaluate_sma_crossover
 import logging
 
@@ -49,6 +54,22 @@ async def analyze_stock(
     quote = get_stock_price(normalized_symbol)
     fundamentals = get_stock_fundamentals(normalized_symbol)
     return analyze_stock_history(normalized_symbol, history, quote, fundamentals)
+
+
+@router.get("/stocks/news")
+async def get_stock_news(
+    symbol: str = Query(..., min_length=1, max_length=12),
+    limit: int = Query(10, ge=1, le=10),
+):
+    """Return the latest company headlines and their text-based tone cues."""
+    normalized_symbol = symbol.strip().upper()
+    if not normalized_symbol or any(
+        not (character.isalnum() or character in ".-")
+        for character in normalized_symbol
+    ):
+        raise HTTPException(status_code=422, detail="Invalid stock symbol")
+
+    return get_company_news(normalized_symbol, limit)
 
 # Mock data
 mock_suggestions = [

@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     ALPACA_API_KEY: Optional[str] = None
     ALPACA_SECRET_KEY: Optional[str] = None
     FINNHUB_API_KEY: Optional[str] = None
+    BENZINGA_API_KEY: Optional[str] = None
+    MASSIVE_API_KEY: Optional[str] = None
+    SEC_CONTACT_EMAIL: Optional[str] = None
     
     # JWT
     SECRET_KEY: str = "your-secret-key-change-in-production"
