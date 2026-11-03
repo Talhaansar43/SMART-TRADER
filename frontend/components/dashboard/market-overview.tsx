@@ -80,7 +80,49 @@ const BENCHMARKS: BenchmarkDefinition[] = [
   { symbol: 'IWM', name: 'Russell 2000', color: '#be123c' },
 ];
 
-type TrendRange = '1M' | '3M' | '6M' | '1Y';
+type TrendRange = '1D' | '1W' | '1M' | '3M' | '6M' | '1Y';
+
+const RANGE_OPTIONS: TrendRange[] = ['1D', '1W', '1M', '3M', '6M', '1Y'];
+const RANGE_SESSIONS: Record<TrendRange, number> = { '1D': 1, '1W': 5, '1M': 21, '3M': 63, '6M': 126, '1Y': 252 };
+
+interface RangeStats {
+  returnPct: number | null;
+  positionPct: number | null;
+  high: number | null;
+  low: number | null;
+  volatilityPct: number | null;
+  obvChange: number | null;
+}
+
+// The window starts at the close before the range so returns match the chart's base.
+function calculateRangeStats(bars: HistoryBar[], sessions: number): RangeStats {
+  const window = bars.slice(-(sessions + 1));
+  if (window.length < 2) {
+    return { returnPct: null, positionPct: null, high: null, low: null, volatilityPct: null, obvChange: null };
+  }
+  const closes = window.map((bar) => Number(bar.close));
+  const last = closes[closes.length - 1];
+  const high = Math.max(...window.map((bar) => Number(bar.high ?? bar.close)));
+  const low = Math.min(...window.map((bar) => Number(bar.low ?? bar.close)));
+  const returns = closes.slice(1).map((close, index) => close / closes[index] - 1);
+  const returnMean = mean(returns);
+  const volatilityPct = returns.length > 1 && returnMean != null
+    ? Math.sqrt(returns.reduce((sum, value) => sum + (value - returnMean) ** 2, 0) / (returns.length - 1) * 252) * 100
+    : null;
+  let obvChange = 0;
+  for (let index = 1; index < window.length; index += 1) {
+    if (closes[index] > closes[index - 1]) obvChange += Number(window[index].volume);
+    else if (closes[index] < closes[index - 1]) obvChange -= Number(window[index].volume);
+  }
+  return {
+    returnPct: (last / closes[0] - 1) * 100,
+    positionPct: high > low ? (last - low) / (high - low) * 100 : null,
+    high,
+    low,
+    volatilityPct,
+    obvChange,
+  };
+}
 
 function mean(values: number[]) {
   return values.length ? values.reduce((total, value) => total + value, 0) / values.length : null;
@@ -233,6 +275,12 @@ function formatPct(value: number | null) {
   return value == null ? 'Unavailable' : `${value > 0 ? '+' : ''}${value.toFixed(2)}%`;
 }
 
+function formatCompact(value: number | null) {
+  return value == null
+    ? 'Unavailable'
+    : `${value >= 0 ? '+' : ''}${value.toLocaleString(undefined, { notation: 'compact', maximumFractionDigits: 2 })}`;
+}
+
 function MarketOverview() {
   const [range, setRange] = useState<TrendRange>('1Y');
   const { data = [], isLoading, isFetching, refetch } = useQuery({
@@ -243,18 +291,17 @@ function MarketOverview() {
   });
 
   const verified = data.filter((benchmark) => benchmark.bars.length > 0);
-  const spyBaseline = data.find((benchmark) => benchmark.symbol === 'SPY');
-  const benchmarks = data.map((benchmark) => ({
+  const sessions = RANGE_SESSIONS[range];
+  const withStats = data.map((benchmark) => ({ ...benchmark, stats: calculateRangeStats(benchmark.bars, sessions) }));
+  const spyReturn = withStats.find((benchmark) => benchmark.symbol === 'SPY')?.stats.returnPct ?? null;
+  const benchmarks = withStats.map((benchmark) => ({
     ...benchmark,
-    relative1mPct: benchmark.change1mPct != null && spyBaseline?.change1mPct != null
-      ? benchmark.change1mPct - spyBaseline.change1mPct
-      : null,
+    relativePct: benchmark.stats.returnPct != null && spyReturn != null ? benchmark.stats.returnPct - spyReturn : null,
   }));
   const spy = benchmarks.find((benchmark) => benchmark.symbol === 'SPY');
   const breadth50 = verified.filter((benchmark) => (benchmark.priceVsSma50Pct ?? -Infinity) > 0).length;
   const breadth200 = verified.filter((benchmark) => (benchmark.priceVsSma200Pct ?? -Infinity) > 0).length;
-  const rangeSessions: Record<TrendRange, number> = { '1M': 21, '3M': 63, '6M': 126, '1Y': 252 };
-  const chartBars = Math.min(rangeSessions[range], ...verified.map((benchmark) => benchmark.bars.length));
+  const chartBars = Math.min(sessions + 1, ...verified.map((benchmark) => benchmark.bars.length));
   const chartData: TrendPoint[] = [];
   if (verified.length && chartBars > 0) {
     const datedPoints = new Map<string, TrendPoint>();
@@ -325,12 +372,12 @@ function MarketOverview() {
               <p className="mt-1 text-lg font-semibold text-slate-900">{spy?.rsi14?.toFixed(1) ?? 'Unavailable'} <span className="text-xs font-medium text-slate-500">{spy?.rsiState ?? ''}</span></p>
             </div>
             <div className="border-r border-slate-100 px-4 py-3 sm:border-r xl:border-r">
-              <p className="text-xs font-medium text-slate-500">S&P 500 20-day volatility</p>
-              <p className="mt-1 text-lg font-semibold text-slate-900">{spy?.volatility20dPct == null ? 'Unavailable' : `${spy.volatility20dPct.toFixed(1)}%`}</p>
+              <p className="text-xs font-medium text-slate-500">S&P 500 volatility · {range}</p>
+              <p className="mt-1 text-lg font-semibold text-slate-900">{spy?.stats.volatilityPct == null ? 'Unavailable' : `${spy.stats.volatilityPct.toFixed(1)}%`}</p>
             </div>
             <div className="px-4 py-3">
-              <p className="text-xs font-medium text-slate-500">S&P 500 52-week range</p>
-              <p className="mt-1 text-lg font-semibold text-slate-900">{spy?.rangePositionPct == null ? 'Unavailable' : `${spy.rangePositionPct.toFixed(0)}%`}</p>
+              <p className="text-xs font-medium text-slate-500">S&P 500 return · {range}</p>
+              <p className={`mt-1 text-lg font-semibold ${spy?.stats.returnPct == null ? 'text-slate-900' : positive(spy.stats.returnPct) ? 'text-emerald-700' : 'text-rose-700'}`}>{formatPct(spy?.stats.returnPct ?? null)}</p>
             </div>
           </div>
 
@@ -344,7 +391,7 @@ function MarketOverview() {
               ))}
             </div>
             <div className="inline-flex rounded-md border border-slate-300 p-0.5" role="group" aria-label="Market trend chart range">
-              {(['1M', '3M', '6M', '1Y'] as const).map((item) => (
+              {RANGE_OPTIONS.map((item) => (
                 <button
                   key={item}
                   type="button"
@@ -398,18 +445,18 @@ function MarketOverview() {
                   <p className="mt-1 text-xs text-slate-500">%B {spy.bollingerPercentB?.toFixed(0) ?? 'N/A'} · width {spy.bollingerWidthPct?.toFixed(1) ?? 'N/A'}%</p>
                 </div>
                 <div>
-                  <dt className="text-slate-500">52-week trading range</dt>
-                  <dd className="mt-1 font-semibold tabular-nums text-slate-900">{formatPrice(spy.low52Week)} – {formatPrice(spy.high52Week)}</dd>
-                  <p className="mt-1 text-xs text-slate-500">{spy.rangePositionPct?.toFixed(1) ?? 'N/A'}% of range</p>
+                  <dt className="text-slate-500">Trading range · {range}</dt>
+                  <dd className="mt-1 font-semibold tabular-nums text-slate-900">{formatPrice(spy.stats.low)} – {formatPrice(spy.stats.high)}</dd>
+                  <p className="mt-1 text-xs text-slate-500">{spy.stats.positionPct?.toFixed(1) ?? 'N/A'}% of range</p>
                 </div>
                 <div>
-                  <dt className="text-slate-500">OBV change · 20 sessions</dt>
-                  <dd className="mt-1 font-semibold tabular-nums text-slate-900">{spy.obvChange20 == null ? 'Unavailable' : `${spy.obvChange20 >= 0 ? '+' : ''}${spy.obvChange20.toLocaleString(undefined, { notation: 'compact', maximumFractionDigits: 2 })}`}</dd>
-                  <p className="mt-1 text-xs text-slate-500">Trend: {spy.obvTrend ?? 'Unavailable'}</p>
+                  <dt className="text-slate-500">OBV change · {range}</dt>
+                  <dd className="mt-1 font-semibold tabular-nums text-slate-900">{formatCompact(spy.stats.obvChange)}</dd>
+                  <p className="mt-1 text-xs text-slate-500">Trend: {spy.stats.obvChange == null ? 'Unavailable' : spy.stats.obvChange >= 0 ? 'Rising' : 'Falling'}</p>
                 </div>
                 <div>
-                  <dt className="text-slate-500">Relative strength · 1M vs SPY</dt>
-                  <dd className="mt-1 font-semibold tabular-nums text-slate-900">{formatPct(spy.relative1mPct)}</dd>
+                  <dt className="text-slate-500">Relative strength · {range} vs SPY</dt>
+                  <dd className="mt-1 font-semibold tabular-nums text-slate-900">{formatPct(spy.relativePct)}</dd>
                   <p className="mt-1 text-xs text-slate-500">SPY is the comparison baseline</p>
                 </div>
               </dl>
@@ -422,17 +469,16 @@ function MarketOverview() {
                 <tr>
                   <th className="px-3 py-2 font-medium">Benchmark</th>
                   <th className="px-3 py-2 text-right font-medium">Latest close</th>
-                  <th className="px-3 py-2 text-right font-medium">1D</th>
-                  <th className="px-3 py-2 text-right font-medium">1M</th>
-                  <th className="px-3 py-2 text-right font-medium">1Y</th>
+                  <th className="px-3 py-2 text-right font-medium">Return · {range}</th>
+                  <th className="px-3 py-2 text-right font-medium">vs SPY · {range}</th>
+                  <th className="px-3 py-2 text-right font-medium">Range position · {range}</th>
+                  <th className="px-3 py-2 text-right font-medium">Volatility · {range}</th>
                   <th className="px-3 py-2 text-right font-medium">vs SMA 50</th>
                   <th className="px-3 py-2 text-right font-medium">vs SMA 200</th>
                   <th className="px-3 py-2 text-right font-medium">RSI 14</th>
                   <th className="px-3 py-2 text-right font-medium">MACD hist.</th>
                   <th className="px-3 py-2 text-right font-medium">BB %B</th>
-                  <th className="px-3 py-2 text-right font-medium">52W position</th>
-                  <th className="px-3 py-2 text-right font-medium">1M vs SPY</th>
-                  <th className="px-3 py-2 text-right font-medium">OBV 20d</th>
+                  <th className="px-3 py-2 text-right font-medium">OBV change · {range}</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -442,19 +488,19 @@ function MarketOverview() {
                       {benchmark.symbol}<span className="ml-2 font-normal text-slate-500">{benchmark.name}</span>
                     </th>
                     <td className="whitespace-nowrap px-3 py-3 text-right tabular-nums text-slate-800">{formatPrice(benchmark.close)}</td>
-                    {[benchmark.change1dPct, benchmark.change1mPct, benchmark.change1yPct].map((value, index) => (
+                    {[benchmark.stats.returnPct, benchmark.relativePct].map((value, index) => (
                       <td key={`${benchmark.symbol}-${index}`} className={`whitespace-nowrap px-3 py-3 text-right tabular-nums ${value == null ? 'text-slate-400' : positive(value) ? 'text-emerald-700' : 'text-rose-700'}`}>
                         {formatPct(value)}
                       </td>
                     ))}
+                    <td className="whitespace-nowrap px-3 py-3 text-right tabular-nums text-slate-800">{benchmark.stats.positionPct?.toFixed(0) ?? 'Unavailable'}%</td>
+                    <td className="whitespace-nowrap px-3 py-3 text-right tabular-nums text-slate-800">{benchmark.stats.volatilityPct == null ? 'Unavailable' : `${benchmark.stats.volatilityPct.toFixed(1)}%`}</td>
                     <td className="whitespace-nowrap px-3 py-3 text-right tabular-nums text-slate-800">{formatPct(benchmark.priceVsSma50Pct)}</td>
                     <td className="whitespace-nowrap px-3 py-3 text-right tabular-nums text-slate-800">{formatPct(benchmark.priceVsSma200Pct)}</td>
                     <td className="whitespace-nowrap px-3 py-3 text-right tabular-nums text-slate-800">{benchmark.rsi14?.toFixed(1) ?? 'Unavailable'} · {benchmark.rsiState ?? 'N/A'}</td>
                     <td className="whitespace-nowrap px-3 py-3 text-right tabular-nums text-slate-800">{benchmark.macdHistogram?.toFixed(2) ?? 'Unavailable'}</td>
                     <td className="whitespace-nowrap px-3 py-3 text-right tabular-nums text-slate-800">{benchmark.bollingerPercentB?.toFixed(0) ?? 'Unavailable'}%</td>
-                    <td className="whitespace-nowrap px-3 py-3 text-right tabular-nums text-slate-800">{benchmark.rangePositionPct?.toFixed(0) ?? 'Unavailable'}%</td>
-                    <td className={`whitespace-nowrap px-3 py-3 text-right tabular-nums ${benchmark.relative1mPct == null ? 'text-slate-400' : positive(benchmark.relative1mPct) ? 'text-emerald-700' : 'text-rose-700'}`}>{formatPct(benchmark.relative1mPct)}</td>
-                    <td className="whitespace-nowrap px-3 py-3 text-right text-slate-800">{benchmark.obvTrend ?? 'Unavailable'}</td>
+                    <td className="whitespace-nowrap px-3 py-3 text-right tabular-nums text-slate-800">{formatCompact(benchmark.stats.obvChange)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -462,7 +508,7 @@ function MarketOverview() {
           </div>
 
           <p className="text-xs leading-relaxed text-slate-500">
-            Market-wide P/E, Shiller CAPE, price-to-book, credit spreads, GDP, employment, interest rates, and inflation are not connected to a data provider yet; no values are inferred. Technical readings use ETF proxies and are not the same as full-market breadth.
+            The range selector drives returns, relative strength, volatility, range position, OBV and the chart; SMA, RSI, MACD and Bollinger readings use fixed lookbacks. Market-wide P/E, Shiller CAPE, price-to-book, credit spreads, GDP, employment, interest rates, and inflation are not connected to a data provider yet; no values are inferred. Technical readings use ETF proxies and are not the same as full-market breadth.
           </p>
         </>
       )}

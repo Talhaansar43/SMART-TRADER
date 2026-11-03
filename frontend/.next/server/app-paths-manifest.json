@@ -1,6 +1,6 @@
 {
-  "/trades/page": "app/trades/page.js",
   "/portfolio/page": "app/portfolio/page.js",
   "/analysis/page": "app/analysis/page.js",
-  "/dashboard/page": "app/dashboard/page.js"
+  "/dashboard/page": "app/dashboard/page.js",
+  "/trades/page": "app/trades/page.js"
 }
