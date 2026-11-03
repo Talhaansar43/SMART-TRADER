@@ -524,6 +524,7 @@ def get_stock_history(
     symbol: str,
     days: int = 30,
     allow_mock: bool = True,
+    use_finnhub: bool = True,
 ) -> Dict[str, Any]:
     """
     Get historical stock data from Finnhub
@@ -532,6 +533,7 @@ def get_stock_history(
         symbol: Stock symbol
         days: Calendar days of daily candle history to retrieve
         allow_mock: Whether to return generated candles after all real sources fail
+        use_finnhub: Whether to try Finnhub before the Yahoo Finance fallback
     
     Returns:
         dict: Historical data
@@ -566,7 +568,7 @@ def get_stock_history(
 
     provider_errors = []
     
-    if FINNHUB_AVAILABLE and finnhub_client:
+    if use_finnhub and FINNHUB_AVAILABLE and finnhub_client:
         try:
             end_time = datetime.now(timezone.utc)
             start_time = end_time - timedelta(days=days)

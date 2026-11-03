@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Body
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.services.paper_trading_bot import normalize_bot_symbol, paper_trading_bot
+from app.services.paper_trading_bot import paper_trading_bot
 from typing import List
 from enum import Enum
 from decimal import Decimal
@@ -59,10 +59,12 @@ class OrderResponse(BaseModel):
     createdAt: str
 
 class PaperBotStartRequest(BaseModel):
-    symbol: str = Field(..., min_length=1, max_length=12)
-    quantity: int = Field(..., gt=0, le=10000)
-    initialCash: Decimal = Field(..., gt=0, le=1000000)
-    intervalSeconds: int = Field(300, ge=300, le=86400)
+    positionSize: Decimal = Field(..., gt=0, le=1000000)
+    maxPositions: int = Field(20, ge=1, le=600)
+    initialCash: Decimal = Field(..., gt=0, le=100000000)
+    intervalSeconds: int = Field(10, ge=10, le=3600)
+    includeStocks: bool = True
+    includeCrypto: bool = True
 
 
 @router.get("/bot/status")
@@ -73,14 +75,15 @@ async def get_paper_bot_status():
 
 @router.post("/bot/start")
 async def start_paper_bot(request: PaperBotStartRequest):
-    """Start the paper-only SMA bot; this endpoint never submits broker orders."""
+    """Start the paper-only scanner; this endpoint never submits broker orders."""
     try:
-        symbol = normalize_bot_symbol(request.symbol)
         paper_trading_bot.start(
-            symbol=symbol,
-            quantity=request.quantity,
+            position_size=request.positionSize,
+            max_positions=request.maxPositions,
             starting_cash=request.initialCash,
             interval_seconds=request.intervalSeconds,
+            include_stocks=request.includeStocks,
+            include_crypto=request.includeCrypto,
         )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
