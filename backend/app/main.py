@@ -17,14 +17,17 @@ logger = logging.getLogger(__name__)
 
 # Import routes
 from app.api.routes import market, portfolio, trades, analysis
+from app.services.paper_trading_bot import paper_trading_bot
 
 # Lifespan context manager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("Smart Trader API starting up...")
+    paper_trading_bot.restore()
     yield
     # Shutdown
+    await paper_trading_bot.shutdown()
     logger.info("Smart Trader API shutting down...")
 
 # Create FastAPI instance

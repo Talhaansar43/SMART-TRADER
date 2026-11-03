@@ -1,32 +1,29 @@
-"""In-memory paper trading that scans S&P 500 stocks and major crypto with the SMA crossover baseline."""
+"""Persistent paper-trading bot running the trend-breakout strategy over S&P 500 stocks and major crypto."""
 
 import asyncio
-import copy
-import csv
-import io
 import logging
-import math
-import re
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_DOWN, Decimal
 from typing import Any
 
-import requests
-
+from app.services import trend_strategy as strategy
+from app.services.bot_store import BotStore
 from app.services.market_service import get_stock_history
-from app.services.strategy_service import FAST_WINDOW, SLOW_WINDOW, evaluate_sma_crossover
+from app.services.universe import REGIME_SYMBOLS, build_universe, load_sp500_symbols
 
 logger = logging.getLogger(__name__)
 
-MAX_EVENTS = 150
 BATCH_SIZE = 8
-HISTORY_DAYS = 150
-SP500_CSV_URL = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv"
-CRYPTO_SYMBOLS = [
-    "BTC-USD", "ETH-USD", "BNB-USD", "XRP-USD", "SOL-USD", "ADA-USD", "DOGE-USD", "TRX-USD", "AVAX-USD",
-    "LINK-USD", "DOT-USD", "LTC-USD", "BCH-USD", "XLM-USD", "ATOM-USD", "ETC-USD", "XMR-USD", "NEAR-USD",
-]
+HISTORY_DAYS = 420
+MAX_EVENTS = 200
+STATUS_TRADE_LIMIT = 200
+MAX_STALE_DAYS = 7
+FEE_RATE = Decimal(str(strategy.FEE_RATE))
+MIN_ORDER_VALUE = Decimal("5")
+UNIT = Decimal("0.000001")
+VERIFIED_SOURCES = {"finnhub", "yahoo_finance"}
 
 
 def _now() -> str:
@@ -37,38 +34,44 @@ def _money(value: Decimal) -> str:
     return f"${value:,.2f}" if abs(value) >= 1 else f"${value:,.6f}"
 
 
-def _load_sp500_symbols() -> list[str]:
-    response = requests.get(SP500_CSV_URL, timeout=15)
-    response.raise_for_status()
-    symbols = []
-    for row in csv.DictReader(io.StringIO(response.text)):
-        # Yahoo uses dashes for share classes, e.g. BRK-B.
-        symbol = (row.get("Symbol") or "").strip().upper().replace(".", "-")
-        if re.fullmatch(r"[A-Z0-9-]{1,10}", symbol):
-            symbols.append(symbol)
-    return symbols
-
-
 def _scan_symbol(symbol: str) -> dict[str, Any]:
     try:
         history = get_stock_history(symbol, days=HISTORY_DAYS, allow_mock=False, use_finnhub=False)
-        signal = evaluate_sma_crossover(symbol, history)
         bars = history.get("data")
-        last_bar = bars[-1] if isinstance(bars, list) and bars else None
-        price = last_bar.get("close") if isinstance(last_bar, dict) else None
-        return {"symbol": symbol, "signal": signal, "price": price}
+        if history.get("mock") is not False or history.get("source") not in VERIFIED_SOURCES or not isinstance(bars, list):
+            return {"symbol": symbol, "analysis": None, "error": "SOURCE_NOT_VERIFIED"}
+        analysis = strategy.analyze(bars)
+        if analysis is None:
+            return {"symbol": symbol, "analysis": None, "error": "INSUFFICIENT_OR_INVALID_HISTORY"}
+        age = (datetime.now(timezone.utc).date() - datetime.strptime(analysis["date"], "%Y-%m-%d").date()).days
+        if age > MAX_STALE_DAYS:
+            return {"symbol": symbol, "analysis": None, "error": "STALE_DATA"}
+        return {"symbol": symbol, "analysis": analysis, "error": None}
     except Exception:
         logger.debug("Paper bot scan failed for %s", symbol, exc_info=True)
-        return {"symbol": symbol, "signal": {"status": "NOT_EVALUATED", "reason": "FETCH_FAILED"}, "price": None}
+        return {"symbol": symbol, "analysis": None, "error": "FETCH_FAILED"}
 
 
 class PaperTradingBot:
-    def __init__(self) -> None:
+    def __init__(self, store: BotStore | None = None) -> None:
+        self._store_obj = store
         self._running = False
         self._task: asyncio.Task[None] | None = None
         self._stop_event: asyncio.Event | None = None
+        self._run_id: int | None = None
+        self._started_at: str | None = None
+        self._saved_universe_size = 0
+        self._reset_run_state()
+
+    @property
+    def _store(self) -> BotStore:
+        if self._store_obj is None:
+            self._store_obj = BotStore()
+        return self._store_obj
+
+    def _reset_run_state(self) -> None:
+        self._config: dict[str, Any] = {}
         self._interval_seconds = 10
-        self._position_size = Decimal("0")
         self._max_positions = 0
         self._starting_cash = Decimal("0")
         self._cash = Decimal("0")
@@ -76,29 +79,100 @@ class PaperTradingBot:
         self._positions: dict[str, dict[str, Any]] = {}
         self._universe: list[tuple[str, str]] = []
         self._states: dict[str, dict[str, Any]] = {}
+        self._regime: dict[str, dict[str, Any]] = {}
+        self._candidates: dict[str, dict[str, Any]] = {}
         self._acted: dict[str, str] = {}
         self._cursor = 0
         self._pass = 1
-        self._pass_trades_start = 0
+        self._pass_buys = 0
+        self._pass_sells = 0
         self._current_batch: list[str] = []
         self._last_error: str | None = None
-        self._trades: list[dict[str, Any]] = []
-        self._events: list[dict[str, str]] = []
         self._checks = 0
         self._checking = False
-        self._started_at: str | None = None
         self._last_checked_at: str | None = None
         self._next_check_at: str | None = None
 
+    # ---- persistence -------------------------------------------------------------------------
+
+    def _state_dict(self) -> dict[str, Any]:
+        return {
+            "cash": str(self._cash),
+            "realizedPnl": str(self._realized_pnl),
+            "cursor": self._cursor,
+            "pass": self._pass,
+            "checks": self._checks,
+            "universeSize": len(self._universe),
+            "regime": self._regime,
+            "acted": self._acted,
+            "positions": {
+                symbol: {
+                    "assetType": position["assetType"],
+                    "quantity": str(position["quantity"]),
+                    "entry": str(position["entry"]),
+                    "price": str(position["price"]),
+                    "stop": str(position["stop"]),
+                    "costBasis": str(position["costBasis"]),
+                    "entryDate": position["entryDate"],
+                    "reason": position["reason"],
+                }
+                for symbol, position in self._positions.items()
+            },
+        }
+
+    def _load_state(self, state: dict[str, Any]) -> None:
+        self._cash = Decimal(str(state.get("cash", self._starting_cash)))
+        self._realized_pnl = Decimal(str(state.get("realizedPnl", "0")))
+        self._cursor = int(state.get("cursor", 0))
+        self._pass = int(state.get("pass", 1))
+        self._checks = int(state.get("checks", 0))
+        self._saved_universe_size = int(state.get("universeSize", 0))
+        self._regime = state.get("regime", {})
+        self._acted = state.get("acted", {})
+        self._positions = {
+            symbol: {
+                "assetType": position["assetType"],
+                "quantity": Decimal(str(position["quantity"])),
+                "entry": Decimal(str(position["entry"])),
+                "price": Decimal(str(position["price"])),
+                "stop": Decimal(str(position["stop"])),
+                "costBasis": Decimal(str(position["costBasis"])),
+                "entryDate": position["entryDate"],
+                "reason": position["reason"],
+            }
+            for symbol, position in state.get("positions", {}).items()
+        }
+
+    def _save_state(self, status: str | None = None) -> None:
+        if self._run_id is None:
+            return
+        try:
+            self._store.save_state(self._run_id, self._state_dict(), _now(), status)
+        except Exception:
+            logger.exception("Could not save the paper bot state")
+            self._last_error = "The bot state could not be saved to disk; check the backend log"
+
     def _log(self, level: str, message: str) -> None:
-        self._events.append({"time": _now(), "level": level, "message": message})
-        del self._events[:-MAX_EVENTS]
+        if self._run_id is None:
+            return
+        try:
+            self._store.add_event(self._run_id, _now(), level, message)
+        except Exception:
+            logger.exception("Could not save a paper bot event")
+
+    def _commit_trade(self, trade: dict[str, Any]) -> None:
+        try:
+            self._store.record_trade(self._run_id, trade, self._state_dict(), _now())
+        except Exception:
+            logger.exception("Could not save a paper bot trade")
+            self._last_error = "A trade could not be saved to disk; check the backend log"
+
+    # ---- lifecycle ---------------------------------------------------------------------------
 
     def start(
         self,
-        position_size: Decimal,
-        max_positions: int,
         starting_cash: Decimal,
+        max_positions: int,
         interval_seconds: int,
         include_stocks: bool,
         include_crypto: bool,
@@ -107,47 +181,88 @@ class PaperTradingBot:
             raise RuntimeError("The paper trading bot is already running")
         if not (include_stocks or include_crypto):
             raise ValueError("Select at least one market to scan")
-        if position_size > starting_cash:
-            raise ValueError("Position size cannot exceed the starting paper cash")
 
+        self._reset_run_state()
+        self._config = {
+            "includeStocks": include_stocks,
+            "includeCrypto": include_crypto,
+            "maxPositions": max_positions,
+            "intervalSeconds": interval_seconds,
+            "startingCash": str(starting_cash),
+        }
         self._interval_seconds = interval_seconds
-        self._position_size = position_size
         self._max_positions = max_positions
         self._starting_cash = starting_cash
         self._cash = starting_cash
-        self._realized_pnl = Decimal("0")
-        self._positions = {}
-        self._universe = []
-        self._states = {}
-        self._acted = {}
-        self._cursor = 0
-        self._pass = 1
-        self._pass_trades_start = 0
-        self._current_batch = []
-        self._last_error = None
-        self._trades = []
-        self._events = []
-        self._checks = 0
-        self._checking = False
+        self._saved_universe_size = 0
         self._started_at = _now()
-        self._last_checked_at = None
-        self._next_check_at = None
+        self._run_id = self._store.create_run(self._config, self._state_dict(), self._started_at)
         self._running = True
         self._log(
             "info",
-            f"Started: {_money(position_size)} per position, up to {max_positions} open positions, "
-            f"{_money(starting_cash)} paper cash, one batch every {interval_seconds} s.",
+            f"Started run #{self._run_id} with {_money(starting_cash)} of paper cash, up to {max_positions} positions, "
+            f"one batch every {interval_seconds} s. Strategy: {strategy.STRATEGY_NAME}.",
         )
-        self._stop_event = asyncio.Event()
-        self._task = asyncio.create_task(self._run(include_stocks, include_crypto))
+        self._launch()
 
     def stop(self) -> None:
         if self._running:
-            self._log("info", "Stopped. Open simulated positions are kept.")
-        self._running = False
-        self._next_check_at = None
+            self._running = False
+            self._next_check_at = None
+            self._log("info", "Stopped. Open simulated positions are kept and saved.")
+            self._save_state(status="stopped")
         if self._stop_event:
             self._stop_event.set()
+
+    def restore(self) -> None:
+        """Load the saved account at app start and resume the run if it was still running."""
+        try:
+            run = self._store.latest_run()
+        except Exception:
+            logger.exception("Could not read the saved paper bot history")
+            return
+        if run is None:
+            return
+
+        self._reset_run_state()
+        self._run_id = run["id"]
+        self._started_at = run["startedAt"]
+        self._config = run["config"]
+        self._interval_seconds = int(self._config.get("intervalSeconds", 10))
+        self._max_positions = int(self._config.get("maxPositions", 6))
+        self._starting_cash = Decimal(str(self._config.get("startingCash", "0")))
+        self._load_state(run["state"])
+        if run["status"] == "running":
+            self._running = True
+            self._log(
+                "info",
+                f"Resumed run #{self._run_id} after an application restart: restored {_money(self._cash)} cash, "
+                f"{len(self._positions)} open position(s) and the full trade history.",
+            )
+            self._launch()
+
+    def list_trades(self, limit: int, run_id: int | None = None) -> list[dict[str, Any]]:
+        return self._store.list_trades(limit, run_id)
+
+    async def shutdown(self) -> None:
+        """Stop the loop without marking the run stopped, so the next start resumes it."""
+        task = self._task
+        if task and not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await task
+        self._save_state()
+
+    def _launch(self) -> None:
+        self._stop_event = asyncio.Event()
+        self._task = asyncio.create_task(
+            self._run(bool(self._config.get("includeStocks", True)), bool(self._config.get("includeCrypto", True)))
+        )
+
+    # ---- status ------------------------------------------------------------------------------
+
+    def _equity(self) -> Decimal:
+        return self._cash + sum((p["quantity"] * p["price"] for p in self._positions.values()), Decimal("0"))
 
     def status(self) -> dict[str, Any]:
         positions = []
@@ -155,7 +270,7 @@ class PaperTradingBot:
         unrealized = Decimal("0")
         for symbol, position in sorted(self._positions.items()):
             value = position["quantity"] * position["price"]
-            pnl = (position["price"] - position["entry"]) * position["quantity"]
+            pnl = value - position["costBasis"]
             market_value += value
             unrealized += pnl
             positions.append({
@@ -164,30 +279,53 @@ class PaperTradingBot:
                 "quantity": float(position["quantity"]),
                 "averageEntryPrice": float(position["entry"]),
                 "lastPrice": float(position["price"]),
+                "stopPrice": float(position["stop"]),
                 "marketValue": float(value),
                 "unrealizedPnl": float(pnl),
+                "unrealizedPct": float(pnl / position["costBasis"]) if position["costBasis"] else None,
+                "entryDate": position["entryDate"],
+                "reason": position["reason"],
             })
+        equity = self._cash + market_value
+
+        trades: list[dict[str, Any]] = []
+        events: list[dict[str, str]] = []
+        stats: dict[str, Any] = {}
+        run_count = 0
+        read_error = None
+        try:
+            trades = self._store.list_trades(STATUS_TRADE_LIMIT)
+            run_count = self._store.run_count()
+            if self._run_id is not None:
+                events = self._store.list_events(self._run_id, MAX_EVENTS)
+                stats = self._store.closed_trade_stats(self._run_id)
+        except Exception:
+            logger.exception("Could not read the saved paper bot history")
+            read_error = "The saved trade history could not be read from disk; check the backend log"
+
         readable = [state for state in self._states.values() if state["status"] == "OK"]
-        return copy.deepcopy({
+        return {
             "running": self._running,
             "mode": "PAPER",
-            "strategy": "sma_crossover",
-            "strategyInfo": {
-                "name": f"SMA {FAST_WINDOW}/{SLOW_WINDOW} crossover (long only)",
-                "fastWindow": FAST_WINDOW,
-                "slowWindow": SLOW_WINDOW,
-                "rules": [
-                    f"BUY a symbol when its {FAST_WINDOW}-day average crosses above its {SLOW_WINDOW}-day average, if it is not held and a position slot and cash are free.",
-                    f"SELL the whole position when the {FAST_WINDOW}-day average crosses below the {SLOW_WINDOW}-day average.",
-                    f"Every tick scans the next {BATCH_SIZE} symbols; the full universe is covered over many ticks because data providers limit request rates.",
-                ],
-            },
+            "runId": self._run_id,
+            "runCount": run_count,
+            "persistence": {"path": str(self._store.path), "saved": True},
+            "strategyInfo": {"name": strategy.STRATEGY_NAME, "rules": strategy.STRATEGY_RULES},
             "checking": self._checking,
             "checks": self._checks,
             "startedAt": self._started_at,
             "lastCheckedAt": self._last_checked_at,
             "nextCheckAt": self._next_check_at,
             "intervalSeconds": self._interval_seconds,
+            "maxPositions": self._max_positions,
+            "startingCash": float(self._starting_cash),
+            "cash": float(self._cash),
+            "equity": float(equity),
+            "returnPct": float(equity / self._starting_cash - 1) if self._starting_cash > 0 else None,
+            "realizedPnl": float(self._realized_pnl),
+            "unrealizedPnl": float(unrealized),
+            "stats": stats,
+            "regime": self._regime,
             "universe": {
                 "total": len(self._universe),
                 "stocks": sum(1 for _, kind in self._universe if kind == "STOCK"),
@@ -200,31 +338,25 @@ class PaperTradingBot:
                 "downtrend": sum(1 for state in readable if state["trend"] == "DOWNTREND"),
                 "unavailable": sum(1 for state in self._states.values() if state["status"] != "OK"),
             },
-            "positionSize": float(self._position_size),
-            "maxPositions": self._max_positions,
-            "startingCash": float(self._starting_cash),
-            "cash": float(self._cash),
-            "equity": float(self._cash + market_value),
-            "realizedPnl": float(self._realized_pnl),
-            "unrealizedPnl": float(unrealized),
             "positions": positions,
-            "events": self._events[-MAX_EVENTS:],
-            "lastError": self._last_error,
-            "trades": self._trades[-50:],
-        })
+            "trades": trades,
+            "events": events,
+            "lastError": read_error or self._last_error,
+        }
+
+    # ---- scan loop ---------------------------------------------------------------------------
 
     async def _run(self, include_stocks: bool, include_crypto: bool) -> None:
         stop_event = self._stop_event
+        run_id = self._run_id
         if stop_event is None:
             return
 
         def active() -> bool:
-            # A newer start() replaces the stop event, which retires this loop.
-            return self._running and self._stop_event is stop_event
+            # A newer start() replaces the stop event and run id, which retires this loop.
+            return self._running and self._stop_event is stop_event and self._run_id == run_id
 
         if not await self._prepare_universe(include_stocks, include_crypto, active):
-            if active():
-                self._running = False
             return
 
         while active():
@@ -238,6 +370,7 @@ class PaperTradingBot:
                 for result in results:
                     self._process_result(result)
                 self._finish_pass_if_complete()
+                self._save_state()
             except Exception:
                 logger.exception("Paper trading scan failed")
                 self._last_error = "A scan could not be completed; no order was placed for that batch"
@@ -258,31 +391,33 @@ class PaperTradingBot:
             break
 
     async def _prepare_universe(self, include_stocks: bool, include_crypto: bool, active: Any) -> bool:
-        universe: list[tuple[str, str]] = []
-        if include_crypto:
-            universe.extend((symbol, "CRYPTO") for symbol in CRYPTO_SYMBOLS)
+        stocks: list[str] = []
         if include_stocks:
             self._log("info", "Loading the S&P 500 constituent list...")
             try:
-                stocks = await asyncio.to_thread(_load_sp500_symbols)
-                universe.extend((symbol, "STOCK") for symbol in stocks)
+                stocks = await asyncio.to_thread(load_sp500_symbols)
             except Exception:
                 logger.exception("Could not load the S&P 500 constituent list")
                 self._log("warn", "Could not load the S&P 500 list; continuing without stocks.")
         if not active():
             return False
+
+        universe = build_universe(stocks, include_stocks and bool(stocks), include_crypto)
         if not universe:
             self._last_error = "No symbols to scan; the bot stopped"
             self._log("warn", self._last_error)
+            self.stop()
             return False
 
         self._universe = universe
-        passes = math.ceil(len(universe) / BATCH_SIZE)
+        if self._saved_universe_size != len(universe) or self._cursor >= len(universe):
+            self._cursor = 0
+        ticks = -(-len(universe) // BATCH_SIZE)
         self._log(
             "info",
             f"Universe ready: {sum(1 for _, kind in universe if kind == 'STOCK')} stocks and "
-            f"{sum(1 for _, kind in universe if kind == 'CRYPTO')} crypto pairs. A full pass takes "
-            f"{passes} ticks (at least {passes * self._interval_seconds // 60} min).",
+            f"{sum(1 for _, kind in universe if kind == 'CRYPTO')} crypto pairs. A full pass takes {ticks} ticks "
+            f"(at least {ticks * self._interval_seconds // 60} min).",
         )
         return True
 
@@ -297,98 +432,180 @@ class PaperTradingBot:
         with ThreadPoolExecutor(max_workers=BATCH_SIZE) as pool:
             return list(pool.map(_scan_symbol, batch))
 
-    def _finish_pass_if_complete(self) -> None:
-        if not self._universe or self._cursor < len(self._universe):
-            return
-        readable = [state for state in self._states.values() if state["status"] == "OK"]
-        self._log(
-            "info",
-            f"Pass {self._pass} complete: {len(readable)} symbols read, "
-            f"{len(self._states) - len(readable)} unavailable, "
-            f"{sum(1 for state in readable if state['trend'] == 'UPTREND')} in uptrend, "
-            f"{len(self._trades) - self._pass_trades_start} trade(s) this pass, "
-            f"{len(self._positions)} open position(s).",
-        )
-        self._pass += 1
-        self._cursor = 0
-        self._pass_trades_start = len(self._trades)
-
     def _asset_type(self, symbol: str) -> str:
         return next((kind for item, kind in self._universe if item == symbol), "STOCK")
 
+    def _finish_pass_if_complete(self) -> None:
+        if not self._universe or self._cursor < len(self._universe):
+            return
+        self._execute_entries()
+        readable = [state for state in self._states.values() if state["status"] == "OK"]
+        equity = self._equity()
+        change = equity / self._starting_cash - 1 if self._starting_cash > 0 else Decimal("0")
+        self._log(
+            "info",
+            f"Pass {self._pass} complete: {len(readable)} symbols read, {len(self._states) - len(readable)} unavailable, "
+            f"{self._pass_buys} bought, {self._pass_sells} sold, {len(self._positions)} open; "
+            f"equity {_money(equity)} ({change:+.1%} vs start).",
+        )
+        self._pass += 1
+        self._cursor = 0
+        self._pass_buys = 0
+        self._pass_sells = 0
+        self._candidates = {}
+        self._save_state()
+
+    # ---- strategy ----------------------------------------------------------------------------
+
     def _process_result(self, result: dict[str, Any]) -> None:
         symbol = result["symbol"]
-        signal = result["signal"]
-        if signal.get("status") != "EVALUATED" or result["price"] is None:
-            self._states[symbol] = {"status": "UNAVAILABLE", "reason": signal.get("reason")}
+        analysis = result["analysis"]
+        if analysis is None:
+            self._states[symbol] = {"status": "UNAVAILABLE", "reason": result["error"]}
             return
 
-        try:
-            price = Decimal(str(result["price"]))
-        except ArithmeticError:
-            self._states[symbol] = {"status": "UNAVAILABLE", "reason": "INVALID_PRICE"}
-            return
-        if price <= 0:
-            self._states[symbol] = {"status": "UNAVAILABLE", "reason": "INVALID_PRICE"}
-            return
+        price = Decimal(str(analysis["close"]))
+        self._states[symbol] = {"status": "OK", "trend": "UPTREND" if strategy.regime_is_on(analysis) else "DOWNTREND"}
+        kind = self._asset_type(symbol)
+        if symbol == REGIME_SYMBOLS.get(kind):
+            self._update_regime(kind, symbol, analysis)
 
-        fast, slow = signal["fastAverage"], signal["slowAverage"]
-        signal_date = signal.get("asOf")
-        action = signal.get("signal")
-        self._states[symbol] = {"status": "OK", "trend": "UPTREND" if fast > slow else "DOWNTREND"}
         position = self._positions.get(symbol)
-        if position:
+        if position is not None:
             position["price"] = price
-        # One action per symbol per bar date avoids churn on a partial daily bar.
-        if not isinstance(signal_date, str) or self._acted.get(symbol) == signal_date:
+            reason = strategy.exit_reason(analysis, float(position["entry"]), float(position["stop"]))
+            if reason:
+                self._close_position(symbol, position, price, analysis["date"], reason)
             return
 
-        detail = f"SMA{FAST_WINDOW} {fast:,.2f} vs SMA{SLOW_WINDOW} {slow:,.2f}, bar {signal_date}"
-        if action == "BUY" and position is None:
-            self._acted[symbol] = signal_date
-            if len(self._positions) >= self._max_positions:
-                self._log("warn", f"BUY signal on {symbol} skipped: already at the {self._max_positions} position limit ({detail}).")
-                return
-            quantity = (self._position_size / price).quantize(Decimal("0.000001"), rounding=ROUND_DOWN)
-            cost = quantity * price
-            if quantity <= 0 or cost > self._cash:
-                self._log("warn", f"BUY signal on {symbol} skipped: not enough paper cash ({detail}).")
-                return
-            self._cash -= cost
-            self._positions[symbol] = {"assetType": self._asset_type(symbol), "quantity": quantity, "entry": price, "price": price}
-            self._record_trade(symbol, "BUY", quantity, price, signal_date, None)
-            self._log("trade", f"BUY {symbol}: fast average crossed above slow average ({detail}). Bought {quantity} at {_money(price)} for {_money(cost)}.")
-        elif action == "SELL" and position is not None:
-            self._acted[symbol] = signal_date
-            quantity = position["quantity"]
-            realized = (price - position["entry"]) * quantity
-            self._cash += price * quantity
-            self._realized_pnl += realized
-            del self._positions[symbol]
-            self._record_trade(symbol, "SELL", quantity, price, signal_date, realized)
-            self._log("trade", f"SELL {symbol}: fast average crossed below slow average ({detail}). Sold {quantity} at {_money(price)}, P&L {_money(realized)}.")
+        if self._acted.get(symbol) == analysis["date"]:
+            return
+        regime = self._regime.get(kind)
+        if not regime or not regime["on"]:
+            return
+        label = f"market filter on ({regime['symbol']} ${regime['close']:,.2f} is above its 200-day average ${regime['sma200']:,.2f})"
+        reason = strategy.entry_reason(analysis, label)
+        if reason:
+            self._candidates[symbol] = {
+                "symbol": symbol,
+                "kind": kind,
+                "price": price,
+                "atr": analysis["atr"],
+                "momentum": analysis["momentum"],
+                "date": analysis["date"],
+                "reason": reason,
+            }
 
-    def _record_trade(
-        self,
+    def _update_regime(self, kind: str, symbol: str, analysis: dict[str, Any]) -> None:
+        on = strategy.regime_is_on(analysis)
+        previous = self._regime.get(kind)
+        self._regime[kind] = {"symbol": symbol, "on": on, "close": analysis["close"], "sma200": analysis["sma200"]}
+        if previous is not None and previous["on"] != on:
+            self._log(
+                "info",
+                f"Market filter for {kind.lower()} turned {'ON' if on else 'OFF'}: {symbol} ${analysis['close']:,.2f} vs "
+                f"200-day average ${analysis['sma200']:,.2f}. New {kind.lower()} entries are {'allowed' if on else 'paused'}.",
+            )
+
+    def _execute_entries(self) -> None:
+        ranked = sorted(self._candidates.values(), key=lambda item: item["momentum"], reverse=True)
+        if not ranked:
+            return
+        self._log(
+            "info",
+            "Breakout candidates this pass, strongest 6-month momentum first: "
+            + ", ".join(f"{item['symbol']} {item['momentum']:+.0%}" for item in ranked[:8])
+            + (f" and {len(ranked) - 8} more" if len(ranked) > 8 else "")
+            + ".",
+        )
+        for rank, candidate in enumerate(ranked, 1):
+            if len(self._positions) >= self._max_positions:
+                self._log("info", f"{len(ranked) - rank + 1} lower-ranked candidate(s) skipped: all {self._max_positions} position slots are in use.")
+                break
+            if self._cash < MIN_ORDER_VALUE:
+                self._log("info", f"{len(ranked) - rank + 1} lower-ranked candidate(s) skipped: no cash left ({_money(self._cash)}).")
+                break
+            regime = self._regime.get(candidate["kind"])
+            if regime and regime["on"]:
+                self._open_position(candidate, rank, len(ranked))
+
+    def _open_position(self, candidate: dict[str, Any], rank: int, total: int) -> None:
+        symbol = candidate["symbol"]
+        price: Decimal = candidate["price"]
+        equity = self._equity()
+        size = strategy.position_size(float(equity), float(self._cash), float(price), candidate["atr"])
+        quantity = Decimal(str(size["quantity"])).quantize(UNIT, rounding=ROUND_DOWN)
+        gross = quantity * price
+        if gross < MIN_ORDER_VALUE:
+            self._log("warn", f"BUY {symbol} skipped: the order would be under {_money(MIN_ORDER_VALUE)} (cash {_money(self._cash)}).")
+            return
+        fee = gross * FEE_RATE
+        cost = gross + fee
+        stop = Decimal(str(strategy.initial_stop(float(price), candidate["atr"]))).quantize(UNIT)
+        reason = (
+            f"BUY {symbol}: {candidate['reason']} Ranked #{rank} of {total} breakout candidates this pass. "
+            f"Risk budget {strategy.RISK_PCT:.1%} of equity ({_money(Decimal(str(size['riskDollars'])))}) with the stop at "
+            f"{_money(stop)} ({strategy.STOP_ATR:g} ATR below entry); size limited by {size['limitedBy']}: "
+            f"{quantity} units = {_money(gross)} ({gross / equity:.0%} of equity) plus {_money(fee)} fee."
+        )
+        self._cash -= cost
+        self._positions[symbol] = {
+            "assetType": candidate["kind"],
+            "quantity": quantity,
+            "entry": price,
+            "price": price,
+            "stop": stop,
+            "costBasis": cost,
+            "entryDate": candidate["date"],
+            "reason": reason,
+        }
+        self._pass_buys += 1
+        self._commit_trade(self._trade_record(symbol, candidate["kind"], "BUY", quantity, price, fee, None, reason, candidate["date"]))
+        self._log("trade", reason)
+
+    def _close_position(self, symbol: str, position: dict[str, Any], price: Decimal, date: str, why: str) -> None:
+        quantity = position["quantity"]
+        gross = quantity * price
+        fee = gross * FEE_RATE
+        proceeds = gross - fee
+        realized = proceeds - position["costBasis"]
+        reason = (
+            f"SELL {symbol}: {why} Sold {quantity} at {_money(price)} (bought at {_money(position['entry'])} on "
+            f"{position['entryDate']}); result {_money(realized)} ({realized / position['costBasis']:+.1%}) after {_money(fee)} fee."
+        )
+        self._cash += proceeds
+        self._realized_pnl += realized
+        del self._positions[symbol]
+        self._acted[symbol] = date
+        self._pass_sells += 1
+        self._commit_trade(self._trade_record(symbol, position["assetType"], "SELL", quantity, price, fee, realized, reason, date))
+        self._log("trade", reason)
+
+    @staticmethod
+    def _trade_record(
         symbol: str,
+        asset_type: str,
         side: str,
         quantity: Decimal,
         price: Decimal,
+        fee: Decimal,
+        realized: Decimal | None,
+        reason: str,
         signal_date: str,
-        realized_pnl: Decimal | None,
-    ) -> None:
-        self._trades.append({
-            "id": f"paper-{len(self._trades) + 1}",
+    ) -> dict[str, Any]:
+        return {
             "symbol": symbol,
-            "assetType": self._asset_type(symbol),
+            "assetType": asset_type,
             "side": side,
             "quantity": float(quantity),
             "price": float(price),
-            "total": float(price * quantity),
-            "realizedPnl": float(realized_pnl) if realized_pnl is not None else None,
+            "total": float(quantity * price),
+            "fee": float(fee),
+            "realizedPnl": float(realized) if realized is not None else None,
+            "reason": reason,
             "signalDate": signal_date,
             "createdAt": _now(),
-        })
+        }
 
 
 paper_trading_bot = PaperTradingBot()

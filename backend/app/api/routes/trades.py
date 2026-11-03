@@ -5,7 +5,7 @@ Dependencies: fastapi, pydantic, sqlalchemy
 Related Files: app/models/trade.py, app/services/trading_service.py
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Body
+from fastapi import APIRouter, Depends, HTTPException, Body, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from app.database import get_db
@@ -59,9 +59,8 @@ class OrderResponse(BaseModel):
     createdAt: str
 
 class PaperBotStartRequest(BaseModel):
-    positionSize: Decimal = Field(..., gt=0, le=1000000)
-    maxPositions: int = Field(20, ge=1, le=600)
-    initialCash: Decimal = Field(..., gt=0, le=100000000)
+    initialCash: Decimal = Field(Decimal("1000"), gt=0, le=100000000)
+    maxPositions: int = Field(5, ge=1, le=50)
     intervalSeconds: int = Field(10, ge=10, le=3600)
     includeStocks: bool = True
     includeCrypto: bool = True
@@ -69,18 +68,23 @@ class PaperBotStartRequest(BaseModel):
 
 @router.get("/bot/status")
 async def get_paper_bot_status():
-    """Return the in-memory status and simulated trade ledger."""
+    """Return the current account, positions, saved trade history and activity log."""
     return paper_trading_bot.status()
+
+
+@router.get("/bot/trades")
+async def get_paper_bot_trades(limit: int = Query(500, ge=1, le=5000), run_id: int | None = Query(None, alias="runId")):
+    """Saved paper trades across all runs, newest first, with the reason for each one."""
+    return paper_trading_bot.list_trades(limit, run_id)
 
 
 @router.post("/bot/start")
 async def start_paper_bot(request: PaperBotStartRequest):
-    """Start the paper-only scanner; this endpoint never submits broker orders."""
+    """Start a new paper run; this endpoint never submits broker orders."""
     try:
         paper_trading_bot.start(
-            position_size=request.positionSize,
-            max_positions=request.maxPositions,
             starting_cash=request.initialCash,
+            max_positions=request.maxPositions,
             interval_seconds=request.intervalSeconds,
             include_stocks=request.includeStocks,
             include_crypto=request.includeCrypto,

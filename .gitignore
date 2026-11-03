@@ -79,3 +79,4 @@ dump.rdb
 .tmp/
 temp/
 /frontend/NUL
+backend/data/
